@@ -1,0 +1,4 @@
+# Path to directory containing memory-mapped .npy files:
+#   z_traj.npy    : (N, seq_len+1, latent_dim)
+#   elements.npy  : (N, seq_len, element_dim)
+path: null  # Required — set via override or config

@@ -1,0 +1,10 @@
+latent_dim: 64
+d_model: 256
+n_layers: 6
+n_heads: 8
+n_freq: 32
+element_dim: 7
+lambda_min: 0.01
+lambda_max: 1000.0
+dropout: 0.1
+mlp_ratio: 4

@@ -1,0 +1,9 @@
+# Default configuration
+# Sub-configs can be referenced by path or inlined
+
+model: model/default.yaml
+training: training/default.yaml
+data: data/default.yaml
+
+output_dir: ./runs
+run_name: null  # Auto-generated if not specified

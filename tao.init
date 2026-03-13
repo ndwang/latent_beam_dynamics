@@ -1,0 +1,15 @@
+&tao_start
+/
+
+&tao_design_lattice
+  n_universes = 1
+  design_lattice(1)%file = "lattice.bmad"
+/
+
+&tao_beam_init
+  beam_init%n_particle = 100000
+  beam_saved_at = "*"
+  beam_init%position_file = 'beam.h5'
+  beam_dump_file = 'beam_dump.h5'
+  beam_dump_at = '*'
+/

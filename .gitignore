@@ -1,6 +1,9 @@
 # Data files
 *.npy
 *.pkl
+*.h5
+*.hdf5
+data/
 
 # Training outputs
 runs/
@@ -35,6 +38,7 @@ venv/
 
 # Jupyter
 .ipynb_checkpoints/
+
 
 # OS
 .DS_Store

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Training script for LatentBeamTransformer.
+"""Training script for TrackingTransformer.
 
 Usage:
     # Default config
@@ -24,14 +24,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from src.model import ModelConfig, LatentBeamTransformer
+from src.models import ModelConfig, TrackingTransformer
 from src.data import LatentTrajectoryDataset
 from src.training import Trainer
 from src.utils import load_config, save_config, generate_run_name, init_wandb
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description="Train LatentBeamTransformer")
+    parser = argparse.ArgumentParser(description="Train TrackingTransformer")
     parser.add_argument("--config", "-c", type=str, default=None)
     parser.add_argument("--config-dir", type=str, default="configs")
     parser.add_argument("--resume", type=str, default=None)
@@ -103,7 +103,7 @@ def main():
 
     # Model
     model_config = ModelConfig(**model_cfg_dict)
-    model = LatentBeamTransformer(model_config)
+    model = TrackingTransformer(model_config)
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model: {param_count:,} parameters")
 

@@ -1,134 +1,18 @@
 """
-Latent-Space Causal Transformer for Accelerator Beam Dynamics
+Tracking Transformer for latent beam dynamics.
 
-Implements the architecture from MODEL_DESIGN.md:
-  Element Encoder
-  Continuous Positional Encoding (Fourier features)
-  GPT-Style Causal Transformer
+GPT-style causal transformer that predicts beam state evolution
+through a sequence of accelerator elements.
 """
 
 import math
-from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 
+from .common import ElementEncoder, ModelConfig
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ModelConfig:
-    # Beam latent state dimension (from pre-trained VAE)
-    latent_dim: int = 64
-    # Transformer hidden dimension
-    d_model: int = 256
-    # Number of transformer layers
-    n_layers: int = 6
-    # Number of attention heads
-    n_heads: int = 8
-    # Number of Fourier frequency pairs for positional encoding
-    n_freq: int = 32
-    # Raw element parameter dimension: [L, K1, K2, Angle, V_rf, f_rf, phi_rf]
-    element_dim: int = 7
-    # Wavelength range for Fourier positional encoding (meters)
-    lambda_min: float = 0.01
-    lambda_max: float = 1000.0
-    # Dropout rate
-    dropout: float = 0.1
-    # Feed-forward expansion ratio
-    mlp_ratio: int = 4
-
-
-# Physics-informed normalization scales (design doc Section 3, Module A.2)
-#   L     -> / 1.0 m
-#   K1    -> / 10.0 m^-2
-#   K2    -> / 10.0 m^-2
-#   Angle -> / 2π
-#   V_rf  -> / 10.0 MV
-#   f_rf  -> / 1.0 GHz
-#   phi_rf-> / 2π
-_NORM_SCALES = [1.0, 10.0, 10.0, 2.0 * math.pi, 10.0, 1.0, 2.0 * math.pi]
-
-
-class ElementEncoder(nn.Module):
-    """Maps heterogeneous raw element parameters to position-aware embeddings.
-
-    Combines physics-informed normalization, an MLP projection,
-    and Fourier positional encoding.
-    """
-
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        self.register_buffer(
-            "norm_scales", torch.tensor(_NORM_SCALES, dtype=torch.float32)
-        )
-        self.mlp = nn.Sequential(
-            nn.Linear(config.element_dim, config.d_model),
-            nn.GELU(),
-            nn.Linear(config.d_model, config.d_model),
-            nn.GELU(),
-            nn.Linear(config.d_model, config.d_model),
-        )
-        self.pos_encoder = ContinuousPositionalEncoding(config)
-
-    def forward(self, x_raw: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x_raw: (B, N, element_dim) raw element parameters.
-        Returns:
-            (B, N, d_model) position-mixed element embeddings.
-        """
-        x_norm = x_raw / self.norm_scales
-        element_emb = self.mlp(x_norm)
-        lengths = x_raw[..., 0]
-        positions = ContinuousPositionalEncoding.compute_positions(lengths)
-        return self.pos_encoder(element_emb, positions)
-
-
-class ContinuousPositionalEncoding(nn.Module):
-    """Fourier-feature positional encoding for longitudinal position s.
-
-    Frequencies are geometrically spaced so the model can resolve structure
-    at scales from centimetres to kilometres.
-    """
-
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        # ω = 1/λ,  geometrically spaced
-        omega_min = 1.0 / config.lambda_max
-        omega_max = 1.0 / config.lambda_min
-        log_freqs = torch.linspace(math.log(omega_min), math.log(omega_max), config.n_freq)
-        self.register_buffer("freqs", torch.exp(log_freqs))  # (n_freq,)
-
-        pos_dim = 2 * config.n_freq  # sin + cos for each frequency
-        self.mix_proj = nn.Linear(config.d_model + pos_dim, config.d_model)
-
-    @staticmethod
-    def compute_positions(lengths: torch.Tensor) -> torch.Tensor:
-        """Starting position of each element:  s_i = Σ_{j<i} L_j.
-
-        Args:
-            lengths: (B, N) element lengths.
-        Returns:
-            (B, N) longitudinal start positions.
-        """
-        return torch.cumsum(lengths, dim=-1) - lengths
-
-    def forward(
-        self, element_emb: torch.Tensor, positions: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Args:
-            element_emb: (B, N, d_model) from element encoder.
-            positions:   (B, N)           longitudinal positions s.
-        Returns:
-            (B, N, d_model) position-mixed element embeddings.
-        """
-        angles = 2.0 * math.pi * positions.unsqueeze(-1) * self.freqs  # (B, N, n_freq)
-        pos_features = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
-        return self.mix_proj(torch.cat([element_emb, pos_features], dim=-1))
+TrackingConfig = ModelConfig
 
 
 class CausalTransformer(nn.Module):
@@ -143,7 +27,15 @@ class CausalTransformer(nn.Module):
 
     def __init__(self, config: ModelConfig):
         super().__init__()
+        self.fusion = config.fusion
         self.z_proj = nn.Linear(config.latent_dim, config.d_model)
+
+        if config.fusion == "concat":
+            self.fusion_proj = nn.Linear(2 * config.d_model, config.d_model)
+        elif config.fusion == "bilinear":
+            self.fusion_proj = nn.Linear(3 * config.d_model, config.d_model)
+        elif config.fusion != "add":
+            raise ValueError(f"Unknown fusion mode: {config.fusion!r}")
 
         layer = nn.TransformerEncoderLayer(
             d_model=config.d_model,
@@ -184,17 +76,19 @@ class CausalTransformer(nn.Module):
         Returns:
             delta_z: (B, N, latent_dim) predicted state updates.
         """
-        tokens = self.z_proj(z_prev) + h
+        z_p = self.z_proj(z_prev)
+        if self.fusion == "add":
+            tokens = z_p + h
+        elif self.fusion == "concat":
+            tokens = self.fusion_proj(torch.cat([z_p, h], dim=-1))
+        else:  # bilinear
+            tokens = self.fusion_proj(torch.cat([z_p, h, z_p * h], dim=-1))
         mask = self._causal_mask(tokens.size(1), tokens.device)
         out = self.out_norm(self.transformer(tokens, mask=mask))
         return self.delta_proj(out)
 
 
-# ---------------------------------------------------------------------------
-# Full Model
-# ---------------------------------------------------------------------------
-
-class LatentBeamTransformer(nn.Module):
+class TrackingTransformer(nn.Module):
     """Latent-Space Causal Transformer for Accelerator Beam Dynamics.
 
     Predicts the evolution of a VAE-encoded beam state through a variable
@@ -355,65 +249,3 @@ class LatentBeamTransformer(nn.Module):
         if z_gt is not None:
             return self.forward_scheduled_sampling(z0, x_raw, z_gt, sampling_prob)
         return self.forward_autoregressive(z0, x_raw)
-
-
-# ---------------------------------------------------------------------------
-# Loss helpers
-# ---------------------------------------------------------------------------
-
-def trajectory_mse_loss(
-    z_pred: torch.Tensor,
-    z_gt: torch.Tensor,
-) -> torch.Tensor:
-    """Mean squared error averaged over batch, sequence, and latent dims.
-
-    L = (1 / (B·N·d)) Σ (z^GT − ẑ)²
-    """
-    return ((z_pred - z_gt) ** 2).mean()
-
-
-def scheduled_sampling_prob(epoch: int, warmup: int = 10, k: float = 0.05) -> float:
-    """Linearly increasing sampling probability after a warmup period.
-
-    Returns 0 during warmup, then increases toward 1.
-    """
-    if epoch < warmup:
-        return 0.0
-    return min(1.0, (epoch - warmup) * k)
-
-
-# ---------------------------------------------------------------------------
-# Quick sanity check
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    cfg = ModelConfig(latent_dim=32, d_model=128, n_layers=4, n_heads=8)
-    model = LatentBeamTransformer(cfg)
-
-    param_count = sum(p.numel() for p in model.parameters())
-    print(f"Config:     {cfg}")
-    print(f"Parameters: {param_count:,}")
-
-    B, N = 4, 20  # batch of 4, lattice with 20 elements
-    z0 = torch.randn(B, cfg.latent_dim)
-    x_raw = torch.randn(B, N, cfg.element_dim).abs()  # lengths should be positive
-    z_gt = torch.randn(B, N, cfg.latent_dim)
-
-    # Teacher forcing (parallel)
-    z_pred_tf = model(z0, x_raw, z_gt=z_gt, sampling_prob=0.0)
-    loss_tf = trajectory_mse_loss(z_pred_tf, z_gt)
-    print(f"Teacher forcing  — output shape: {z_pred_tf.shape}, loss: {loss_tf.item():.4f}")
-
-    # Scheduled sampling
-    z_pred_ss = model(z0, x_raw, z_gt=z_gt, sampling_prob=0.3)
-    loss_ss = trajectory_mse_loss(z_pred_ss, z_gt)
-    print(f"Scheduled samp.  — output shape: {z_pred_ss.shape}, loss: {loss_ss.item():.4f}")
-
-    # Autoregressive inference
-    with torch.no_grad():
-        z_pred_ar = model(z0, x_raw)
-    print(f"Autoregressive   — output shape: {z_pred_ar.shape}")
-
-    # Backward pass check
-    loss_tf.backward()
-    print("Backward pass OK")

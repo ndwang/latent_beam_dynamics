@@ -1,3 +1,3 @@
-from .model import ModelConfig, LatentBeamTransformer
+from .models import ModelConfig, TrackingTransformer, LatticeTransformer
 
-__all__ = ["ModelConfig", "LatentBeamTransformer"]
+__all__ = ["ModelConfig", "TrackingTransformer", "LatticeTransformer"]

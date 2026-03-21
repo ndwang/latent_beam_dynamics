@@ -1,25 +1,32 @@
 """Configuration validation using Pydantic models."""
 
+from dataclasses import fields as _dc_fields
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from src.models.common import ModelConfig as _ModelConfigDC
 
-class ModelConfig(BaseModel):
+# Pull defaults from the canonical dataclass to keep a single source of truth.
+_MC = {f.name: f.default for f in _dc_fields(_ModelConfigDC)}
+
+
+class ModelSchema(BaseModel):
     """Validation schema for model configuration."""
 
     model_config = {"extra": "forbid"}
 
-    latent_dim: int = Field(default=64, ge=1)
-    d_model: int = Field(default=256, ge=1)
-    n_layers: int = Field(default=6, ge=1)
-    n_heads: int = Field(default=8, ge=1)
-    n_freq: int = Field(default=32, ge=1)
-    element_dim: int = Field(default=7, ge=1)
-    lambda_min: float = Field(default=0.01, gt=0.0)
-    lambda_max: float = Field(default=1000.0, gt=0.0)
-    dropout: float = Field(default=0.1, ge=0.0, le=1.0)
-    mlp_ratio: int = Field(default=4, ge=1)
+    latent_dim: int = Field(default=_MC["latent_dim"], ge=1)
+    d_model: int = Field(default=_MC["d_model"], ge=1)
+    n_layers: int = Field(default=_MC["n_layers"], ge=1)
+    n_heads: int = Field(default=_MC["n_heads"], ge=1)
+    n_freq: int = Field(default=_MC["n_freq"], ge=1)
+    element_dim: int = Field(default=_MC["element_dim"], ge=1)
+    lambda_min: float = Field(default=_MC["lambda_min"], gt=0.0)
+    lambda_max: float = Field(default=_MC["lambda_max"], gt=0.0)
+    dropout: float = Field(default=_MC["dropout"], ge=0.0, le=1.0)
+    mlp_ratio: int = Field(default=_MC["mlp_ratio"], ge=1)
+    fusion: str = Field(default=_MC["fusion"])
 
     @field_validator("d_model")
     @classmethod
@@ -102,7 +109,7 @@ class Config(BaseModel):
 
     model_config = {"extra": "forbid"}
 
-    model: ModelConfig = Field(default_factory=ModelConfig)
+    model: ModelSchema = Field(default_factory=ModelSchema)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     data: DataConfig
     run_name: Optional[str] = None

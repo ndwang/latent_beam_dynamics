@@ -9,7 +9,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from .losses import trajectory_mse_loss
+from src.models.losses import trajectory_mse_loss
 
 if TYPE_CHECKING:
     from src.utils.logging import LoggingCallback
@@ -148,6 +148,10 @@ class Trainer:
         model_name: str = "lbd",
         checkpoint_freq: int = 50,
     ) -> Dict[str, list]:
+        if save_dir is not None:
+            save_dir = Path(save_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+
         epoch_bar = tqdm(range(self.start_epoch, epochs), desc="Epochs", unit="epoch")
         for epoch in epoch_bar:
             train_loss = self.train_epoch(train_loader, epoch, max_steps)
@@ -182,9 +186,6 @@ class Trainer:
             )
 
             if save_dir is not None:
-                save_dir = Path(save_dir)
-                save_dir.mkdir(parents=True, exist_ok=True)
-
                 if val_loss < self.best_val_loss:
                     self.best_val_loss = val_loss
                     self._save_checkpoint(
@@ -198,9 +199,6 @@ class Trainer:
                     )
 
         if save_dir is not None:
-            save_dir = Path(save_dir)
-            save_dir.mkdir(parents=True, exist_ok=True)
-
             model_path = save_dir / f"{model_name}.pth"
             torch.save(self.model.state_dict(), model_path)
             print(f"Model saved: {model_path}")

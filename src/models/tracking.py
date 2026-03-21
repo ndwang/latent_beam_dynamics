@@ -152,52 +152,23 @@ class TrackingTransformer(nn.Module):
         delta_z = self.transformer(z_prev, h)
         return z_prev + delta_z
 
-    def forward_autoregressive(
+    def _forward_sequential(
         self,
         z0: torch.Tensor,
         x_raw: torch.Tensor,
+        z_gt: torch.Tensor | None = None,
+        sampling_prob: float = 1.0,
     ) -> torch.Tensor:
-        """Sequential inference using the model's own predictions.
+        """Sequential forward pass shared by autoregressive and scheduled sampling.
 
-        Args:
-            z0:    (B, latent_dim)       initial beam state.
-            x_raw: (B, N, element_dim)   raw element parameters.
-        Returns:
-            z_pred: (B, N, latent_dim)   predicted beam states.
-        """
-        h = self.element_encoder(x_raw)
-        B, N, _ = h.shape
-        d_z = self.config.latent_dim
-
-        z_prev_buf = torch.empty(B, N, d_z, device=z0.device, dtype=z0.dtype)
-        z_pred_buf = torch.empty(B, N, d_z, device=z0.device, dtype=z0.dtype)
-        z_cur = z0
-
-        for t in range(N):
-            z_prev_buf[:, t] = z_cur
-
-            delta_z = self.transformer(z_prev_buf[:, :t+1], h[:, :t+1])
-            z_cur = z_cur + delta_z[:, -1]
-            z_pred_buf[:, t] = z_cur
-
-        return z_pred_buf
-
-    def forward_scheduled_sampling(
-        self,
-        z0: torch.Tensor,
-        x_raw: torch.Tensor,
-        z_gt: torch.Tensor,
-        sampling_prob: float,
-    ) -> torch.Tensor:
-        """Forward pass that randomly replaces GT inputs with predictions.
-
-        At each step the model uses its own predicted z_{t-1} with
-        probability ``sampling_prob``, and z_{t-1}^GT otherwise.
+        When ``z_gt`` is None, runs pure autoregressive inference.
+        When ``z_gt`` is provided, randomly substitutes ground-truth inputs
+        with probability ``1 - sampling_prob``.
 
         Args:
             z0:            (B, latent_dim)
             x_raw:         (B, N, element_dim)
-            z_gt:          (B, N, latent_dim)
+            z_gt:          (B, N, latent_dim) or None
             sampling_prob: probability of using the model's own prediction.
         Returns:
             z_pred: (B, N, latent_dim)
@@ -217,10 +188,12 @@ class TrackingTransformer(nn.Module):
             z_predicted = z_cur + delta_z[:, -1]
             z_pred_buf[:, t] = z_predicted
 
-            # Choose next input: predicted or ground truth
             if t < N - 1:
-                use_pred = (torch.rand(B, 1, device=z0.device) < sampling_prob)
-                z_cur = torch.where(use_pred, z_predicted.detach(), z_gt[:, t])
+                if z_gt is not None:
+                    use_pred = (torch.rand(B, 1, device=z0.device) < sampling_prob)
+                    z_cur = torch.where(use_pred, z_predicted.detach(), z_gt[:, t])
+                else:
+                    z_cur = z_predicted
 
         return z_pred_buf
 
@@ -246,6 +219,4 @@ class TrackingTransformer(nn.Module):
         """
         if z_gt is not None and sampling_prob == 0.0:
             return self.forward_teacher_forcing(z0, x_raw, z_gt)
-        if z_gt is not None:
-            return self.forward_scheduled_sampling(z0, x_raw, z_gt, sampling_prob)
-        return self.forward_autoregressive(z0, x_raw)
+        return self._forward_sequential(z0, x_raw, z_gt, sampling_prob)

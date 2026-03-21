@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional, Union
 
 import yaml
 
+from .validation import validate_config
+
 
 def load_yaml(path: Union[str, Path]) -> Dict[str, Any]:
     with open(path, "r") as f:
@@ -89,7 +91,6 @@ def load_config(
     if overrides:
         composed = apply_overrides(composed, overrides)
 
-    from .validation import validate_config
     composed = validate_config(composed)
 
     return composed

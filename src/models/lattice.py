@@ -6,42 +6,12 @@ beam state z₀ via Adaptive Layer Norm, predicts per-element Δz, and
 recovers the full trajectory with a cumulative sum.
 """
 
-from dataclasses import dataclass, fields
-
 import torch
 import torch.nn as nn
 
 from .common import ElementEncoder, ModelConfig
 
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
-@dataclass
-class LatticeConfig:
-    # Beam latent state dimension (from pre-trained VAE)
-    latent_dim: int = 64
-    # Transformer hidden dimension
-    d_model: int = 256
-    # Number of transformer layers
-    n_layers: int = 6
-    # Number of attention heads
-    n_heads: int = 8
-    # Number of Fourier frequency pairs for positional encoding
-    n_freq: int = 32
-    # Raw element parameter dimension: [L, K1, K2, Angle, V_rf, f_rf, phi_rf]
-    element_dim: int = 7
-    # Wavelength range for Fourier positional encoding (meters)
-    lambda_min: float = 0.01
-    lambda_max: float = 1000.0
-    # Dropout rate
-    dropout: float = 0.1
-    # Feed-forward expansion ratio
-    mlp_ratio: int = 4
-    # Fusion mode for combining latent state and element embeddings
-    # Valid values: "add", "concat", "bilinear"
-    fusion: str = "concat"
+LatticeConfig = ModelConfig
 
 
 # ---------------------------------------------------------------------------
@@ -127,17 +97,13 @@ class LatticeTransformer(nn.Module):
     the full trajectory with a cumulative sum.
     """
 
-    def __init__(self, config: LatticeConfig | None = None):
+    def __init__(self, config: ModelConfig | None = None):
         super().__init__()
         if config is None:
-            config = LatticeConfig()
+            config = ModelConfig()
         self.config = config
 
-        # ElementEncoder expects a ModelConfig-compatible object.
-        # LatticeConfig has the same fields, so build a ModelConfig.
-        _compat = ModelConfig(**{f.name: getattr(config, f.name)
-                                 for f in fields(config) if hasattr(ModelConfig, f.name)})
-        self.element_encoder = ElementEncoder(_compat)
+        self.element_encoder = ElementEncoder(config)
 
         self.beam_cond = BeamConditioner(config.latent_dim, config.d_model, config.n_layers)
         self.layers = nn.ModuleList([

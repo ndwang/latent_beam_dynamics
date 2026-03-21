@@ -1,9 +1,12 @@
 #!/usr/bin/env python
-"""Training script for TrackingTransformer.
+"""Training script for latent beam dynamics models.
 
 Usage:
-    # Default config
+    # Default config (TrackingTransformer)
     python scripts/train.py
+
+    # Train LatticeTransformer
+    python scripts/train.py model.arch=lattice
 
     # Override hyperparameters
     python scripts/train.py model.d_model=512 training.epochs=300
@@ -24,14 +27,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from src.models import ModelConfig, TrackingTransformer
+from src.models import ModelConfig, TrackingTransformer, LatticeTransformer
 from src.data import LatentTrajectoryDataset
-from src.training import Trainer
+from src.training import TrackingTrainer, LatticeTrainer
 from src.utils import load_config, save_config, generate_run_name, init_wandb
+
+_MODELS = {
+    "tracking": TrackingTransformer,
+    "lattice": LatticeTransformer,
+}
+
+_TRAINERS = {
+    "tracking": TrackingTrainer,
+    "lattice": LatticeTrainer,
+}
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description="Train TrackingTransformer")
+    parser = argparse.ArgumentParser(description="Train latent beam dynamics model")
     parser.add_argument("--config", "-c", type=str, default=None)
     parser.add_argument("--config-dir", type=str, default="configs")
     parser.add_argument("--resume", type=str, default=None)
@@ -102,10 +115,17 @@ def main():
     )
 
     # Model
+    model_name_key = model_cfg_dict.pop("name", None)
+    if model_name_key is None:
+        raise ValueError("model.name must be set (e.g. model.name=tracking)")
+    model_cls = _MODELS.get(model_name_key)
+    if model_cls is None:
+        raise ValueError(f"Unknown model.name={model_name_key!r}, expected one of {list(_MODELS)}")
+
     model_config = ModelConfig(**model_cfg_dict)
-    model = TrackingTransformer(model_config)
+    model = model_cls(model_config)
     param_count = sum(p.numel() for p in model.parameters())
-    print(f"Model: {param_count:,} parameters")
+    print(f"Model: {model_name_key} — {param_count:,} parameters")
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -140,16 +160,20 @@ def main():
     _, logger_callback = init_wandb(config, run_name, output_dir)
 
     # Trainer
-    trainer = Trainer(
+    trainer_cls = _TRAINERS[model_name_key]
+    trainer_kwargs = dict(
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
         device=device,
         grad_clip=training_cfg.get("grad_clip", 1.0),
-        ss_warmup=training_cfg.get("ss_warmup", 10),
-        ss_k=training_cfg.get("ss_k", 0.05),
         logger_callback=logger_callback,
     )
+    if model_name_key == "tracking":
+        trainer_kwargs["ss_warmup"] = training_cfg.get("ss_warmup", 10)
+        trainer_kwargs["ss_k"] = training_cfg.get("ss_k", 0.05)
+
+    trainer = trainer_cls(**trainer_kwargs)
 
     if args.resume:
         trainer.load_checkpoint(Path(args.resume))

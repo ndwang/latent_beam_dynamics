@@ -16,6 +16,7 @@ class ModelSchema(BaseModel):
 
     model_config = {"extra": "forbid"}
 
+    name: Literal["tracking", "lattice"]
     latent_dim: int = Field(default=_MC["latent_dim"], ge=1)
     d_model: int = Field(default=_MC["d_model"], ge=1)
     n_layers: int = Field(default=_MC["n_layers"], ge=1)

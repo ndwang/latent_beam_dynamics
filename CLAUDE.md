@@ -20,7 +20,7 @@ Latent-space causal transformer for accelerator beam dynamics, trained on NERSC 
     │   ├── lattice.py    # LatticeTransformer (parallel/AdaLN), LatticeConfig (alias)
     │   └── losses.py     # trajectory_mse_loss
     ├── data/         # LatentTrajectoryDataset
-    ├── training/     # Trainer
+    ├── training/     # BaseTrainer, TrackingTrainer, LatticeTrainer
     └── utils/        # Config, validation, logging, W&B
 ```
 
@@ -49,8 +49,11 @@ Parallel (non-autoregressive) model. The initial beam state z₀ conditions all 
 ## Quick Commands
 
 ```bash
-# Train with defaults
-python scripts/train.py
+# Train TrackingTransformer
+python scripts/train.py model.name=tracking
+
+# Train LatticeTransformer
+python scripts/train.py model.name=lattice
 
 # Override hyperparameters
 python scripts/train.py model.d_model=512 training.epochs=300

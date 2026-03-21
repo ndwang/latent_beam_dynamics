@@ -107,6 +107,7 @@ Hyperparameters are composed from YAML files in `configs/` with CLI dot-notation
 
 ```yaml
 model:
+  name: tracking       # tracking | lattice (required)
   latent_dim: 64       # VAE latent dimension
   d_model: 256         # transformer hidden dimension
   n_layers: 6          # transformer layers
@@ -125,8 +126,8 @@ training:
   lr: 3.0e-4
   weight_decay: 1.0e-2
   grad_clip: 1.0
-  ss_warmup: 10        # epochs of pure teacher forcing
-  ss_k: 0.05           # scheduled sampling ramp rate
+  ss_warmup: 10        # scheduled sampling warmup (TrackingTransformer only)
+  ss_k: 0.05           # scheduled sampling ramp rate (TrackingTransformer only)
 ```
 
 ## Usage
@@ -153,7 +154,12 @@ Requires Python >= 3.13 and PyTorch with CUDA 12.4.
 
 ```bash
 uv sync
-python scripts/train.py
+
+# TrackingTransformer
+python scripts/train.py model.name=tracking
+
+# LatticeTransformer
+python scripts/train.py model.name=lattice
 ```
 
 Run the model sanity check:

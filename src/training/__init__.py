@@ -1,3 +1,3 @@
-from .trainer import Trainer
+from .trainer import BaseTrainer, TrackingTrainer, LatticeTrainer
 
-__all__ = ["Trainer"]
+__all__ = ["BaseTrainer", "TrackingTrainer", "LatticeTrainer"]

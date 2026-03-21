@@ -1,6 +1,7 @@
-"""Trainer for the LatentBeamTransformer."""
+"""Trainers for latent beam dynamics models."""
 
 import csv
+from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, Optional
 
@@ -15,17 +16,17 @@ if TYPE_CHECKING:
     from src.utils.logging import LoggingCallback
 
 
-class Trainer:
-    """Training loop for LatentBeamTransformer.
+class BaseTrainer(ABC):
+    """Base training loop with checkpointing, logging, and scheduling.
+
+    Subclasses must implement ``train_epoch`` and ``validate``.
 
     Args:
-        model: LatentBeamTransformer instance.
+        model: nn.Module instance.
         optimizer: PyTorch optimizer.
         scheduler: Optional LR scheduler.
         device: Compute device.
         grad_clip: Max gradient norm (0 = disabled).
-        ss_warmup: Scheduled-sampling warmup epochs (pure teacher forcing).
-        ss_k: Scheduled-sampling ramp rate after warmup.
         logger_callback: Optional W&B / logging callback.
     """
 
@@ -36,8 +37,6 @@ class Trainer:
         scheduler=None,
         device: Optional[torch.device] = None,
         grad_clip: float = 1.0,
-        ss_warmup: int = 10,
-        ss_k: float = 0.05,
         logger_callback: Optional["LoggingCallback"] = None,
     ):
         self.model = model
@@ -45,8 +44,6 @@ class Trainer:
         self.scheduler = scheduler
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.grad_clip = grad_clip
-        self.ss_warmup = ss_warmup
-        self.ss_k = ss_k
 
         if logger_callback is None:
             from src.utils.logging import NoOpCallback
@@ -58,11 +55,6 @@ class Trainer:
         self.history: Dict[str, list] = {"train_loss": [], "val_loss": []}
 
         self.model.to(self.device)
-
-    def _sampling_prob(self, epoch: int) -> float:
-        if epoch < self.ss_warmup:
-            return 0.0
-        return min(1.0, (epoch - self.ss_warmup) * self.ss_k)
 
     def load_checkpoint(self, checkpoint_path: Path) -> None:
         checkpoint_path = Path(checkpoint_path)
@@ -81,62 +73,24 @@ class Trainer:
         self.start_epoch = ckpt.get("epoch", 0)
         print(f"Resuming from epoch {self.start_epoch}, val_loss={self.best_val_loss:.6f}")
 
+    @abstractmethod
     def train_epoch(
         self, train_loader: DataLoader, epoch: int, max_steps: Optional[int] = None
     ) -> float:
-        self.model.train()
-        sampling_prob = self._sampling_prob(epoch)
-        total_loss = 0.0
-        n_samples = 0
+        ...
 
-        loop = tqdm(train_loader, desc="Training", leave=False)
-        for step, (z0, elements, z_gt) in enumerate(loop):
-            if max_steps is not None and step >= max_steps:
-                break
-
-            z0 = z0.to(self.device)
-            elements = elements.to(self.device)
-            z_gt = z_gt.to(self.device)
-
-            self.optimizer.zero_grad()
-            z_pred = self.model(z0, elements, z_gt=z_gt, sampling_prob=sampling_prob)
-            loss = trajectory_mse_loss(z_pred, z_gt)
-
-            if torch.isnan(loss):
-                raise ValueError(f"NaN loss at step {step}")
-
-            loss.backward()
-            if self.grad_clip > 0:
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-            self.optimizer.step()
-
-            batch_size = z0.size(0)
-            total_loss += loss.item() * batch_size
-            n_samples += batch_size
-            loop.set_postfix(loss=f"{loss.item():.4f}", sp=f"{sampling_prob:.2f}")
-
-        return total_loss / n_samples
-
-    @torch.no_grad()
+    @abstractmethod
     def validate(self, val_loader: DataLoader) -> float:
-        self.model.eval()
-        total_loss = 0.0
-        n_samples = 0
+        ...
 
-        for z0, elements, z_gt in val_loader:
-            z0 = z0.to(self.device)
-            elements = elements.to(self.device)
-            z_gt = z_gt.to(self.device)
-
-            # Validation always uses teacher forcing for a stable metric
-            z_pred = self.model(z0, elements, z_gt=z_gt, sampling_prob=0.0)
-            loss = trajectory_mse_loss(z_pred, z_gt)
-
-            batch_size = z0.size(0)
-            total_loss += loss.item() * batch_size
-            n_samples += batch_size
-
-        return total_loss / n_samples
+    def _log_epoch(self, epoch: int, train_loss: float, val_loss: float) -> Dict[str, float]:
+        """Return metrics dict for logging. Subclasses can extend."""
+        current_lr = self.optimizer.param_groups[0]["lr"]
+        return {
+            "train/loss": train_loss,
+            "val/loss": val_loss,
+            "learning_rate": current_lr,
+        }
 
     def fit(
         self,
@@ -166,24 +120,13 @@ class Trainer:
                 else:
                     self.scheduler.step()
 
-            current_lr = self.optimizer.param_groups[0]["lr"]
-            sampling_prob = self._sampling_prob(epoch)
+            metrics = self._log_epoch(epoch, train_loss, val_loss)
             epoch_bar.set_postfix(
                 train=f"{train_loss:.4f}",
                 val=f"{val_loss:.4f}",
-                lr=f"{current_lr:.1e}",
-                sp=f"{sampling_prob:.2f}",
+                lr=f"{metrics['learning_rate']:.1e}",
             )
-
-            self.logger_callback.log_metrics(
-                {
-                    "train/loss": train_loss,
-                    "val/loss": val_loss,
-                    "learning_rate": current_lr,
-                    "sampling_prob": sampling_prob,
-                },
-                step=epoch + 1,
-            )
+            self.logger_callback.log_metrics(metrics, step=epoch + 1)
 
             if save_dir is not None:
                 if val_loss < self.best_val_loss:
@@ -235,3 +178,148 @@ class Trainer:
                 zip(self.history["train_loss"], self.history["val_loss"])
             ):
                 writer.writerow([self.start_epoch + i + 1, tl, vl])
+
+
+class TrackingTrainer(BaseTrainer):
+    """Trainer for TrackingTransformer with scheduled sampling.
+
+    Args:
+        ss_warmup: Epochs of pure teacher forcing before sampling ramp.
+        ss_k: Sampling probability ramp rate after warmup.
+    """
+
+    def __init__(
+        self,
+        *args,
+        ss_warmup: int = 10,
+        ss_k: float = 0.05,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.ss_warmup = ss_warmup
+        self.ss_k = ss_k
+
+    def _sampling_prob(self, epoch: int) -> float:
+        if epoch < self.ss_warmup:
+            return 0.0
+        return min(1.0, (epoch - self.ss_warmup) * self.ss_k)
+
+    def train_epoch(
+        self, train_loader: DataLoader, epoch: int, max_steps: Optional[int] = None
+    ) -> float:
+        self.model.train()
+        sampling_prob = self._sampling_prob(epoch)
+        total_loss = 0.0
+        n_samples = 0
+
+        loop = tqdm(train_loader, desc="Training", leave=False)
+        for step, (z0, elements, z_gt) in enumerate(loop):
+            if max_steps is not None and step >= max_steps:
+                break
+
+            z0 = z0.to(self.device)
+            elements = elements.to(self.device)
+            z_gt = z_gt.to(self.device)
+
+            self.optimizer.zero_grad()
+            z_pred = self.model(z0, elements, z_gt=z_gt, sampling_prob=sampling_prob)
+            loss = trajectory_mse_loss(z_pred, z_gt)
+
+            if torch.isnan(loss):
+                raise ValueError(f"NaN loss at step {step}")
+
+            loss.backward()
+            if self.grad_clip > 0:
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            self.optimizer.step()
+
+            batch_size = z0.size(0)
+            total_loss += loss.item() * batch_size
+            n_samples += batch_size
+            loop.set_postfix(loss=f"{loss.item():.4f}", sp=f"{sampling_prob:.2f}")
+
+        return total_loss / n_samples
+
+    @torch.no_grad()
+    def validate(self, val_loader: DataLoader) -> float:
+        self.model.eval()
+        total_loss = 0.0
+        n_samples = 0
+
+        for z0, elements, z_gt in val_loader:
+            z0 = z0.to(self.device)
+            elements = elements.to(self.device)
+            z_gt = z_gt.to(self.device)
+
+            z_pred = self.model(z0, elements, z_gt=z_gt, sampling_prob=0.0)
+            loss = trajectory_mse_loss(z_pred, z_gt)
+
+            batch_size = z0.size(0)
+            total_loss += loss.item() * batch_size
+            n_samples += batch_size
+
+        return total_loss / n_samples
+
+    def _log_epoch(self, epoch: int, train_loss: float, val_loss: float) -> Dict[str, float]:
+        metrics = super()._log_epoch(epoch, train_loss, val_loss)
+        metrics["sampling_prob"] = self._sampling_prob(epoch)
+        return metrics
+
+
+class LatticeTrainer(BaseTrainer):
+    """Trainer for LatticeTransformer (parallel, no scheduled sampling)."""
+
+    def train_epoch(
+        self, train_loader: DataLoader, epoch: int, max_steps: Optional[int] = None
+    ) -> float:
+        self.model.train()
+        total_loss = 0.0
+        n_samples = 0
+
+        loop = tqdm(train_loader, desc="Training", leave=False)
+        for step, (z0, elements, z_gt) in enumerate(loop):
+            if max_steps is not None and step >= max_steps:
+                break
+
+            z0 = z0.to(self.device)
+            elements = elements.to(self.device)
+            z_gt = z_gt.to(self.device)
+
+            self.optimizer.zero_grad()
+            z_pred = self.model(z0, elements)
+            loss = trajectory_mse_loss(z_pred, z_gt)
+
+            if torch.isnan(loss):
+                raise ValueError(f"NaN loss at step {step}")
+
+            loss.backward()
+            if self.grad_clip > 0:
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            self.optimizer.step()
+
+            batch_size = z0.size(0)
+            total_loss += loss.item() * batch_size
+            n_samples += batch_size
+            loop.set_postfix(loss=f"{loss.item():.4f}")
+
+        return total_loss / n_samples
+
+    @torch.no_grad()
+    def validate(self, val_loader: DataLoader) -> float:
+        self.model.eval()
+        total_loss = 0.0
+        n_samples = 0
+
+        for z0, elements, z_gt in val_loader:
+            z0 = z0.to(self.device)
+            elements = elements.to(self.device)
+            z_gt = z_gt.to(self.device)
+
+            z_pred = self.model(z0, elements)
+            loss = trajectory_mse_loss(z_pred, z_gt)
+
+            batch_size = z0.size(0)
+            total_loss += loss.item() * batch_size
+            n_samples += batch_size
+
+        return total_loss / n_samples

@@ -38,7 +38,7 @@ graph TD
     Fuse --> Output["<b>Element Embedding</b><br/>Position-aware, ready<br/>for transformer"]
 ```
 
-### LatentBeamTransformer
+### TrackingTransformer
 
 ```mermaid
 graph LR
@@ -48,7 +48,7 @@ graph LR
     end
 
     subgraph Transformer [Causal Transformer]
-        Fuse["<b>Additive Token Fusion</b><br/>Beam state + element embedding"]
+        Fuse["<b>Token Fusion</b><br/>add / concat / bilinear"]
         subgraph Layer ["Transformer Layer (×N)"]
             Attn["<b>Causal Self-Attention</b><br/>Sees only past elements 0…t"]
             FFN["<b>Feed-Forward Block</b>"]
@@ -83,9 +83,13 @@ graph LR
 
 **ElementEncoder** takes the raw parameter vector for each element `[L, K1, K2, Angle, V_rf, f_rf, phi_rf]`, applies physics-informed normalization, projects through a 3-layer MLP, and mixes in Fourier positional features encoding the element's longitudinal position. A quadrupole with K=0 naturally produces the same embedding as a drift -- no discrete type IDs needed.
 
-**CausalTransformer** is a GPT-style transformer encoder with a causal mask. Each token combines the projected previous beam state with the element embedding. The output is a delta prediction: `z_t = z_{t-1} + Δz_t`.
+**TrackingTransformer** is a GPT-style autoregressive model. Each token fuses the projected previous beam state with the element embedding via one of three fusion modes (`"add"`, `"concat"`, `"bilinear"`). A causal transformer predicts the delta: `z_t = z_{t-1} + Δz_t`.
 
-## Forward Modes
+### LatticeTransformer
+
+A parallel (non-autoregressive) alternative. The initial beam state z₀ conditions all transformer layers via Adaptive Layer Norm (AdaLN). Per-element Δz predictions are accumulated with a cumulative sum: `z_t = z₀ + Σ Δz`. No scheduled sampling needed — the model sees the same inputs at training and inference.
+
+## Forward Modes (TrackingTransformer)
 
 | Mode | `z_gt` | `sampling_prob` | Execution |
 |------|--------|-----------------|-----------|
@@ -95,9 +99,11 @@ graph LR
 
 **Teacher forcing** feeds ground-truth states as input and runs in parallel. **Scheduled sampling** randomly substitutes the model's own (detached) predictions at each step with the given probability, bridging the train/test gap. **Autoregressive** uses only the model's predictions, for inference.
 
+The **LatticeTransformer** has a single `forward(z0, x_raw)` path for both training and inference.
+
 ## Configuration
 
-Model and training hyperparameters are defined in `config.yaml`:
+Hyperparameters are composed from YAML files in `configs/` with CLI dot-notation overrides:
 
 ```yaml
 model:
@@ -111,33 +117,34 @@ model:
   lambda_max: 1000.0   # max positional wavelength (m)
   dropout: 0.1
   mlp_ratio: 4         # feed-forward expansion ratio
+  fusion: concat       # add | concat | bilinear (TrackingTransformer only)
 
 training:
-  epochs: 50
+  epochs: 200
   batch_size: 32
-  learning_rate: 3.0e-4
+  lr: 3.0e-4
   weight_decay: 1.0e-2
   grad_clip: 1.0
-  scheduled_sampling_warmup: 10
-  scheduled_sampling_k: 0.05
+  ss_warmup: 10        # epochs of pure teacher forcing
+  ss_k: 0.05           # scheduled sampling ramp rate
 ```
 
 ## Usage
 
 ```python
-from model import ModelConfig, LatentBeamTransformer
+from src.models import ModelConfig, TrackingTransformer, LatticeTransformer
 
 config = ModelConfig(latent_dim=64, d_model=256)
-model = LatentBeamTransformer(config)
 
-# Training (teacher forcing)
-z_pred = model(z0, x_raw, z_gt=z_gt, sampling_prob=0.0)
+# TrackingTransformer (autoregressive)
+model = TrackingTransformer(config)
+z_pred = model(z0, x_raw, z_gt=z_gt, sampling_prob=0.0)  # teacher forcing
+z_pred = model(z0, x_raw, z_gt=z_gt, sampling_prob=0.3)  # scheduled sampling
+z_pred = model(z0, x_raw)                                 # autoregressive inference
 
-# Training (scheduled sampling)
-z_pred = model(z0, x_raw, z_gt=z_gt, sampling_prob=0.3)
-
-# Inference
-z_pred = model(z0, x_raw)
+# LatticeTransformer (parallel)
+model = LatticeTransformer(config)
+z_pred = model(z0, x_raw)  # same call for training and inference
 ```
 
 ## Setup
@@ -146,11 +153,11 @@ Requires Python >= 3.13 and PyTorch with CUDA 12.4.
 
 ```bash
 uv sync
-uv run python main.py
+python scripts/train.py
 ```
 
 Run the model sanity check:
 
 ```bash
-uv run python model.py
+python scripts/check_models.py
 ```

@@ -10,14 +10,41 @@ Latent-space causal transformer for accelerator beam dynamics, trained on NERSC 
 │   ├── training/     # Training hyperparameters
 │   └── data/         # Dataset paths
 ├── scripts/          # Entry point scripts
-│   └── train.py      # Main training script
+│   ├── train.py      # Main training script
+│   └── check_models.py  # Sanity checks for all model variants
 ├── slurm/            # NERSC job submission scripts
 └── src/              # Source code
-    ├── model.py      # LatentBeamTransformer, ModelConfig
+    ├── models/       # Model definitions (subpackage)
+    │   ├── common.py     # ModelConfig, ElementEncoder, ContinuousPositionalEncoding
+    │   ├── tracking.py   # TrackingTransformer (autoregressive), TrackingConfig
+    │   ├── lattice.py    # LatticeTransformer (parallel/AdaLN), LatticeConfig (alias)
+    │   └── losses.py     # trajectory_mse_loss
     ├── data/         # LatentTrajectoryDataset
-    ├── training/     # Trainer, losses
+    ├── training/     # Trainer
     └── utils/        # Config, validation, logging, W&B
 ```
+
+## Models
+
+Two transformer architectures in `src/models/`, sharing `ElementEncoder` and `ContinuousPositionalEncoding` from `common.py`:
+
+### TrackingTransformer (`tracking.py`)
+
+Autoregressive GPT-style model. Each token fuses the previous beam state z_{t-1} with the element embedding h_t, then a causal transformer predicts Δz. Three forward modes: teacher forcing, scheduled sampling, and autoregressive inference.
+
+- **Config:** `TrackingConfig` (alias for `ModelConfig`)
+- **Fusion modes:** `"add"` (z_proj + h), `"concat"` (linear projection of concatenation), `"bilinear"` (linear projection of [z, h, z*h])
+- Set via `config.fusion` (default: `"concat"`)
+
+### LatticeTransformer (`lattice.py`)
+
+Parallel (non-autoregressive) model. The initial beam state z₀ conditions all transformer layers via Adaptive Layer Norm (AdaLN). Per-element Δz predictions are accumulated with cumsum to produce the trajectory.
+
+- **Config:** `LatticeConfig` (alias for `ModelConfig`)
+- **Key components:**
+  - `BeamConditioner`: maps z₀ → per-layer AdaLN parameters (gamma/beta), initialized to identity
+  - `AdaLNTransformerLayer`: pre-norm attention and FFN with external gamma/beta conditioning
+- Single `forward(z0, x_raw)` path for both training and inference
 
 ## Quick Commands
 
@@ -33,6 +60,9 @@ python scripts/train.py data.path=/path/to/data_dir
 
 # Resume from checkpoint
 python scripts/train.py --resume runs/my_run/lbd_best.pth
+
+# Run model sanity checks
+python scripts/check_models.py
 
 # Submit to SLURM
 sbatch slurm/submit_single.sh

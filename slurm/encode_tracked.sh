@@ -27,7 +27,7 @@ VAE_CKPT=${3:-"/pscratch/sd/n/ndwang/vae/runs/baseline_20260127/baseline_2026012
 
 cd /pscratch/sd/n/ndwang/latent_beam_dynamics
 ml load conda
-conda activate lbd_datagen
+conda activate vae
 
 python scripts/encode_tracked.py \
     --input-dir $INPUT_DIR \

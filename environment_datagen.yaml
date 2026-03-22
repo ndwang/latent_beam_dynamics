@@ -1,12 +1,8 @@
 name: lbd_datagen
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
 dependencies:
   - python>=3.11
-  - pytorch::pytorch
-  - pytorch::pytorch-cuda=12.4
   - numpy
   - h5py
   - pyyaml
@@ -14,3 +10,4 @@ dependencies:
   - pydantic>=2.0
   - conda-forge::distgen
   - conda-forge::openpmd-beamphysics
+  - conda-forge::bmad

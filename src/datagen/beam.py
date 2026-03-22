@@ -124,7 +124,7 @@ def generate_particles(
     distgen_input = {
         'n_particle': n_particles,
         'species': 'electron',
-        'total_charge': {'value': 0, 'units': 'C'},
+        'total_charge': {'value': 1e-9, 'units': 'C'},
         'random': {'type': 'hammersley'},
         'start': {
             'type': 'time',

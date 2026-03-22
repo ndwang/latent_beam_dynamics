@@ -26,7 +26,8 @@
 DATA_DIR=${1:?Usage: sbatch track_beam.sh <data_dir>}
 TAO_INIT="/pscratch/sd/n/ndwang/latent_beam_dynamics/tao.init"
 
-ml load bmad
+ml load conda
+conda activate lbd_datagen
 ml load parallel
 
 export OMP_NUM_THREADS=1
@@ -41,7 +42,10 @@ track_one() {
     fi
 
     cd "$sample_dir"
-    tao -init_file "$tao_init" -noplot -noinit <<EOF
+    tao -init_file "$tao_init" -noplot \
+        -lat lattice.bmad \
+        -beam_init_position_file beam.h5 <<'EOF'
+set global track_type = beam
 quit
 EOF
     echo "DONE $sample_dir"

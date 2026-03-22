@@ -228,11 +228,13 @@ def write_bmad_lattice(
     lines.append(line_def)
     lines.append("use, lat")
 
-    # Reference energy
+    # Global parameters
     energy_eV = energy_GeV * 1e9
     lines.append(f"beginning[e_tot] = {energy_eV:.6f}")
-    lines.append("beginning[beta] = 1")  # ultrarelativistic
+    lines.append("beginning[beta_a] = 1")
+    lines.append("beginning[beta_b] = 1")
     lines.append("parameter[particle] = electron")
+    lines.append("parameter[geometry] = open")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, 'w') as f:

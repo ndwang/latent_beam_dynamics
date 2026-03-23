@@ -18,18 +18,19 @@ I_PHIRF = 6
 
 ELEMENT_DIM = 7
 
-# --- Parameter ranges (from DATA_GENERATION.md) ---
+# --- Parameter ranges ---
 
-L_DRIFT = (0.2, 5.0)       # m
+L_DRIFT = (0.2, 2.0)       # m
 L_QUAD = (0.1, 0.5)        # m
 L_SEXT = (0.1, 0.3)        # m
 L_DIPOLE = (0.5, 3.0)      # m
 L_RF = (0.1, 2.0)          # m
 
-K1_RANGE = (0.5, 5.0)      # m^-2 (absolute value)
-K2_RANGE = (1.0, 10.0)     # m^-3 (absolute value)
-ANGLE_RANGE = (0.01, 0.5)  # rad
-VRF_RANGE = (0.1, 10.0)    # MV
+# Integrated strengths (controls total kick independent of length)
+K1L_RANGE = (0.05, 1.0)    # m^-1 (focal length f = 1/K1L >= 1 m)
+K2L_RANGE = (0.1, 1.5)     # m^-2
+ANGLE_RANGE = (0.01, 0.15) # rad
+VRF_RANGE = (0.1, 5.0)     # MV
 FRF_RANGE = (0.1, 3.0)     # GHz
 PHIRF_RANGE = (-np.pi / 6, np.pi / 6)  # rad
 
@@ -42,18 +43,21 @@ def _sample_drift(rng: np.random.Generator) -> np.ndarray:
 
 def _sample_quad(rng: np.random.Generator, sign: int = 0) -> np.ndarray:
     e = np.zeros(ELEMENT_DIM)
-    e[I_L] = rng.uniform(*L_QUAD)
-    k1_mag = rng.uniform(*K1_RANGE)
+    L = rng.uniform(*L_QUAD)
+    k1l = rng.uniform(*K1L_RANGE)
     if sign == 0:
         sign = rng.choice([-1, 1])
-    e[I_K1] = sign * k1_mag
+    e[I_L] = L
+    e[I_K1] = sign * k1l / L
     return e
 
 
 def _sample_sextupole(rng: np.random.Generator) -> np.ndarray:
     e = np.zeros(ELEMENT_DIM)
-    e[I_L] = rng.uniform(*L_SEXT)
-    e[I_K2] = rng.uniform(*K2_RANGE) * rng.choice([-1, 1])
+    L = rng.uniform(*L_SEXT)
+    k2l = rng.uniform(*K2L_RANGE)
+    e[I_L] = L
+    e[I_K2] = k2l / L * rng.choice([-1, 1])
     return e
 
 

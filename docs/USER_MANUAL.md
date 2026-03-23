@@ -126,7 +126,32 @@ Propagates particles through each lattice using the Tao beam tracking tool.
 Uses GNU Parallel to run one Tao instance per sample directory, filling all
 CPUs on the node.
 
-**Via SLURM (recommended):**
+**Direct (single sample):**
+
+```bash
+conda activate lbd_datagen
+
+cd data/structured/000000
+tao -init_file /pscratch/sd/n/ndwang/latent_beam_dynamics/tao.init \
+    -noplot -lat lattice.bmad -beam_init_position_file beam.h5 <<'EOF'
+set global track_type = beam
+quit
+EOF
+```
+
+**Direct (all samples with GNU Parallel):**
+
+```bash
+conda activate lbd_datagen
+ml load parallel
+
+export OMP_NUM_THREADS=1
+find data/structured -mindepth 1 -maxdepth 1 -type d | sort | \
+    parallel -j$(nproc) 'cd {} && tao -init_file /pscratch/sd/n/ndwang/latent_beam_dynamics/tao.init -noplot -lat lattice.bmad -beam_init_position_file beam.h5 <<< "set global track_type = beam
+quit"'
+```
+
+**Via SLURM (recommended for large runs):**
 
 ```bash
 sbatch slurm/track_beam.sh data/structured
@@ -165,7 +190,7 @@ latent vector, and produces the final `.npy` training files.
 **Direct:**
 
 ```bash
-conda activate lbd_datagen
+conda activate vae
 
 python scripts/encode_tracked.py \
     --input-dir data/structured \

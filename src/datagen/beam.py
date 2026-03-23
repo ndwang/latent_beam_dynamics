@@ -8,15 +8,16 @@ import numpy as np
 from pathlib import Path
 from distgen import Generator
 
-# --- Beam parameter ranges (from DATA_GENERATION.md) ---
+# --- Beam parameter ranges ---
 
-BETA_RANGE = (0.5, 100.0)          # m, log-sampled
-ALPHA_RANGE = (-3.0, 3.0)          # dimensionless
-EMIT_RANGE = (1e-10, 1e-5)         # m*rad (0.1 nm to 10 um), log-sampled
-SIGMA_DELTA_RANGE = (1e-4, 1e-2)   # relative, log-sampled
+BETA_RANGE = (1.0, 30.0)           # m, log-sampled
+ALPHA_RANGE = (-2.0, 2.0)          # dimensionless
+EMIT_N_RANGE = (1e-7, 1e-4)        # m*rad normalized (0.1 um to 100 um), log-sampled
+SIGMA_DELTA_RANGE = (1e-4, 5e-3)   # relative, log-sampled
 SIGMA_Z_RANGE = (1e-4, 0.1)        # m (0.1 mm to 10 cm), log-sampled
 ENERGY_RANGE = (0.5, 10.0)         # GeV, log-sampled
 CENTROID_CLIP = 3.0                 # sigma units
+ELECTRON_MASS_EV = 0.510998950e6   # electron rest mass in eV
 
 
 def sample_beam_params(rng: np.random.Generator) -> dict:
@@ -29,15 +30,25 @@ def sample_beam_params(rng: np.random.Generator) -> dict:
     """
     params = {}
 
+    # Reference energy (sampled first — needed for emittance conversion)
+    params['energy_GeV'] = np.exp(rng.uniform(
+        np.log(ENERGY_RANGE[0]), np.log(ENERGY_RANGE[1])
+    ))
+
     # Twiss
     params['beta_x'] = np.exp(rng.uniform(np.log(BETA_RANGE[0]), np.log(BETA_RANGE[1])))
     params['beta_y'] = np.exp(rng.uniform(np.log(BETA_RANGE[0]), np.log(BETA_RANGE[1])))
     params['alpha_x'] = rng.uniform(*ALPHA_RANGE)
     params['alpha_y'] = rng.uniform(*ALPHA_RANGE)
 
-    # Emittance (geometric)
-    params['emit_x'] = np.exp(rng.uniform(np.log(EMIT_RANGE[0]), np.log(EMIT_RANGE[1])))
-    params['emit_y'] = np.exp(rng.uniform(np.log(EMIT_RANGE[0]), np.log(EMIT_RANGE[1])))
+    # Normalized emittance -> geometric
+    beta_gamma = params['energy_GeV'] * 1e9 / ELECTRON_MASS_EV
+    emit_n_x = np.exp(rng.uniform(np.log(EMIT_N_RANGE[0]), np.log(EMIT_N_RANGE[1])))
+    emit_n_y = np.exp(rng.uniform(np.log(EMIT_N_RANGE[0]), np.log(EMIT_N_RANGE[1])))
+    params['emit_n_x'] = emit_n_x
+    params['emit_n_y'] = emit_n_y
+    params['emit_x'] = emit_n_x / beta_gamma
+    params['emit_y'] = emit_n_y / beta_gamma
 
     # Longitudinal
     params['sigma_delta'] = np.exp(rng.uniform(
@@ -45,11 +56,6 @@ def sample_beam_params(rng: np.random.Generator) -> dict:
     ))
     params['sigma_z'] = np.exp(rng.uniform(
         np.log(SIGMA_Z_RANGE[0]), np.log(SIGMA_Z_RANGE[1])
-    ))
-
-    # Reference energy
-    params['energy_GeV'] = np.exp(rng.uniform(
-        np.log(ENERGY_RANGE[0]), np.log(ENERGY_RANGE[1])
     ))
 
     # Centroid offsets in units of sigma, clipped to [-3, 3]

@@ -18,8 +18,16 @@ def count_alive(beam_dump_path: Path) -> int | None:
             if not pp:
                 return None
             last_path = pp[-1] + "electron/particleStatus"
-            status = np.array(f[last_path])
-            return int(np.sum(status == 1))
+            node = f[last_path]
+            if isinstance(node, h5py.Dataset):
+                # Per-particle status array
+                status = np.array(node)
+                return int(np.sum(status == 1))
+            else:
+                # openPMD constant record: all particles share the same status
+                n_particles = int(node.attrs["shape"][0])
+                value = int(node.attrs["value"][0])
+                return n_particles if value == 1 else 0
     except Exception as e:
         print(f"  Error reading {beam_dump_path}: {e}")
         return None

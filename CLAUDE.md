@@ -10,6 +10,10 @@ Latent-space causal transformer for accelerator beam dynamics, trained on NERSC 
 │   ├── training/     # Training hyperparameters
 │   └── data/         # Dataset paths
 ├── scripts/          # Entry point scripts
+│   ├── generate_inputs.py  # Stage 1: generate lattice + beam inputs
+│   ├── track_one.sh  # Track one sample with Tao (used by GNU parallel)
+│   ├── analyze_data.py  # Post-tracking data quality diagnostics
+│   ├── scan_alive.py # Quick particle survival check
 │   ├── train.py      # Main training script
 │   └── check_models.py  # Sanity checks for all model variants
 ├── slurm/            # NERSC job submission scripts
@@ -49,6 +53,13 @@ Parallel (non-autoregressive) model. The initial beam state z₀ conditions all 
 ## Quick Commands
 
 ```bash
+# Generate sectioned lattices (recommended)
+python scripts/generate_inputs.py --mode sectioned --n-samples 5000 --seq-len 32 --output-dir data/sectioned
+
+# Track particles through lattices
+find data/sectioned -mindepth 1 -maxdepth 1 -type d | sort | \
+    parallel -j$(nproc) bash scripts/track_one.sh {}
+
 # Train TrackingTransformer
 python scripts/train.py model.name=tracking
 

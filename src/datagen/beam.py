@@ -19,9 +19,12 @@ ENERGY_RANGE = (0.5, 10.0)         # GeV, log-sampled
 CENTROID_CLIP = 3.0                 # sigma units
 ELECTRON_MASS_EV = 0.510998950e6   # electron rest mass in eV
 
+# Mismatch parameter range for matched beam sampling
+BMAG_RANGE = (1.0, 5.0)            # log-sampled
+
 
 def sample_beam_params(rng: np.random.Generator) -> dict:
-    """Sample random beam parameters.
+    """Sample random beam parameters (unmatched).
 
     Returns:
         Dictionary with keys: beta_x, beta_y, alpha_x, alpha_y,
@@ -42,6 +45,81 @@ def sample_beam_params(rng: np.random.Generator) -> dict:
     params['alpha_y'] = rng.uniform(*ALPHA_RANGE)
 
     # Normalized emittance -> geometric
+    beta_gamma = params['energy_GeV'] * 1e9 / ELECTRON_MASS_EV
+    emit_n_x = np.exp(rng.uniform(np.log(EMIT_N_RANGE[0]), np.log(EMIT_N_RANGE[1])))
+    emit_n_y = np.exp(rng.uniform(np.log(EMIT_N_RANGE[0]), np.log(EMIT_N_RANGE[1])))
+    params['emit_n_x'] = emit_n_x
+    params['emit_n_y'] = emit_n_y
+    params['emit_x'] = emit_n_x / beta_gamma
+    params['emit_y'] = emit_n_y / beta_gamma
+
+    # Longitudinal
+    params['sigma_delta'] = np.exp(rng.uniform(
+        np.log(SIGMA_DELTA_RANGE[0]), np.log(SIGMA_DELTA_RANGE[1])
+    ))
+    params['sigma_z'] = np.exp(rng.uniform(
+        np.log(SIGMA_Z_RANGE[0]), np.log(SIGMA_Z_RANGE[1])
+    ))
+
+    # Centroid offsets in units of sigma, clipped to [-3, 3]
+    for coord in ['x', 'px', 'y', 'py', 'z', 'delta']:
+        params[f'offset_{coord}'] = np.clip(rng.normal(), -CENTROID_CLIP, CENTROID_CLIP)
+
+    return params
+
+
+def sample_matched_beam_params(
+    rng: np.random.Generator,
+    lattice_info: dict,
+) -> dict:
+    """Sample beam parameters approximately matched to a sectioned lattice.
+
+    Uses the periodic Twiss of the first section as a reference and applies
+    a controlled mismatch via the B_mag parameter. At B_mag=1 the beam is
+    perfectly matched; at B_mag=5 the envelope oscillates with ~5x amplitude.
+
+    The initial alpha is set to 0 (symmetric about quad center) with a small
+    random perturbation.
+
+    Args:
+        rng: NumPy random generator.
+        lattice_info: Dictionary from sample_sectioned_lattice() containing
+            beta_x_periodic, beta_y_periodic, and section metadata.
+
+    Returns:
+        Beam parameter dictionary (same format as sample_beam_params).
+    """
+    params = {}
+
+    # Reference energy
+    params['energy_GeV'] = np.exp(rng.uniform(
+        np.log(ENERGY_RANGE[0]), np.log(ENERGY_RANGE[1])
+    ))
+
+    # Mismatch parameter (log-uniform for even coverage of 1x to 5x)
+    bmag = np.exp(rng.uniform(np.log(BMAG_RANGE[0]), np.log(BMAG_RANGE[1])))
+    params['bmag'] = float(bmag)
+
+    # Twiss matched to lattice with controlled mismatch
+    # At a QF center: beta_x = beta_max, beta_y = beta_min, alpha = 0
+    # Mismatch: scale beta by bmag in one plane and 1/bmag in the other
+    # to get diverse but bounded dynamics
+    beta_x_ref = lattice_info["beta_x_periodic"]
+    beta_y_ref = lattice_info["beta_y_periodic"]
+
+    # Randomly assign which plane gets the larger beta
+    if rng.random() < 0.5:
+        params['beta_x'] = beta_x_ref * bmag
+        params['beta_y'] = beta_y_ref / bmag
+    else:
+        params['beta_x'] = beta_x_ref / bmag
+        params['beta_y'] = beta_y_ref * bmag
+
+    # Small alpha perturbation (matched alpha = 0 at quad center)
+    params['alpha_x'] = rng.normal(0, 0.3)
+    params['alpha_y'] = rng.normal(0, 0.3)
+
+    # Normalized emittance -> geometric (same ranges as unmatched)
     beta_gamma = params['energy_GeV'] * 1e9 / ELECTRON_MASS_EV
     emit_n_x = np.exp(rng.uniform(np.log(EMIT_N_RANGE[0]), np.log(EMIT_N_RANGE[1])))
     emit_n_y = np.exp(rng.uniform(np.log(EMIT_N_RANGE[0]), np.log(EMIT_N_RANGE[1])))

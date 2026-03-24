@@ -1,6 +1,9 @@
 """Stage 1: Generate Bmad input files (lattice + beam) for tracking.
 
 Usage:
+    python scripts/generate_inputs.py --mode sectioned --n-samples 5000 \
+        --seq-len 32 --output-dir data/sectioned
+
     python scripts/generate_inputs.py --mode structured --n-samples 5000 \
         --seq-len 50 --output-dir data/structured
 
@@ -18,18 +21,21 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.datagen.lattice import (
+    sample_sectioned_lattice,
     sample_structured_lattice,
     sample_random_lattice,
+    sample_fodo_lattice,
     write_bmad_lattice,
 )
-from src.datagen.beam import sample_beam_params, generate_particles
+from src.datagen.beam import sample_beam_params, sample_matched_beam_params, generate_particles
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate Bmad input files")
-    parser.add_argument('--mode', choices=['structured', 'random'], required=True)
+    parser.add_argument('--mode', choices=['sectioned', 'structured', 'random', 'fodo'],
+                        required=True)
     parser.add_argument('--n-samples', type=int, required=True)
-    parser.add_argument('--seq-len', type=int, default=50)
+    parser.add_argument('--seq-len', type=int, default=32)
     parser.add_argument('--n-particles', type=int, default=100_000)
     parser.add_argument('--output-dir', type=str, required=True)
     parser.add_argument('--seed', type=int, default=42)
@@ -40,20 +46,29 @@ def main():
 
     rng = np.random.default_rng(args.seed)
 
-    lattice_sampler = (
-        sample_structured_lattice if args.mode == 'structured'
-        else sample_random_lattice
-    )
+    # Legacy modes use unmatched beam sampling
+    legacy_samplers = {
+        'structured': sample_structured_lattice,
+        'random': sample_random_lattice,
+        'fodo': sample_fodo_lattice,
+    }
 
     for i in tqdm(range(args.n_samples), desc=f"Generating {args.mode}"):
         sample_dir = output_dir / f"{i:06d}"
         sample_dir.mkdir(parents=True, exist_ok=True)
 
-        # Sample lattice
-        elements = lattice_sampler(args.seq_len, rng)
+        if args.mode == 'sectioned':
+            # Sectioned mode: matched beam sampling
+            elements, lattice_info = sample_sectioned_lattice(args.seq_len, rng)
+            beam_params = sample_matched_beam_params(rng, lattice_info)
 
-        # Sample beam
-        beam_params = sample_beam_params(rng)
+            # Save lattice info (section structure, periodic Twiss)
+            with open(sample_dir / 'lattice_info.json', 'w') as f:
+                json.dump(lattice_info, f, indent=2)
+        else:
+            # Legacy modes
+            elements = legacy_samplers[args.mode](args.seq_len, rng)
+            beam_params = sample_beam_params(rng)
 
         # Write Bmad lattice file
         write_bmad_lattice(

@@ -355,133 +355,147 @@ elements and the remaining 90% of the sequence is just exponential growth. The m
 sees the same "blowup" pattern over and over and rarely encounters well-controlled
 transport, chromaticity effects, or subtle nonlinear dynamics.
 
-You could recover useful lattices by generating randomly and filtering aggressively
-(beam size cap), but you'd discard the vast majority of what you generate. Structured
-generation is an efficiency optimization: it biases element ordering toward the
-dynamically interesting region of lattice space without constraining the parameters.
+Even with a structured alternating-quad backbone (the `structured` mode), sampling
+each quad's K1 and each drift's length independently causes blowup: the phase advance
+varies wildly from cell to cell, and mismatches compound. With a 100 m default
+aperture in Bmad, 97% of particles survive, but the beam grows to meters — the
+dynamics are physically meaningless and the VAE cannot resolve the beam.
+
+The solution is **sectioned generation**: build lattices from FODO-based sections
+where each section has a consistent cell design derived from a sampled phase advance.
+This guarantees bounded envelope evolution while preserving diversity through section
+transitions, per-cell perturbations, and element insertions.
 
 
-### 3.3 Two structural rules
+### 3.3 Sectioned lattice generation (recommended)
 
-All structured lattice generation reduces to two rules:
+A lattice is built from 2-3 stitched sections. Each section is a stable FODO channel
+with its own optics. Section transitions create non-periodic dynamics.
 
-1. **Alternate focusing and defocusing quads.** Successive quadrupoles should have
-   opposite signs of K1. This is the minimum requirement for net focusing in both
-   transverse planes. Without sign alternation, quads focus in x but defocus in y
-   (or vice versa), and random sign sequences almost always defocus in at least
-   one plane within a few elements.
+**Section types:**
 
-2. **Interleave drifts between non-drift elements.** Real accelerators have physical
-   space between magnets for diagnostics, vacuum hardware, and correctors. Drifts
-   between active elements also give the beam space to evolve between kicks, which
-   produces richer dynamics than back-to-back magnets.
+- **Straight:** FODO cells with quads and drifts. Optional RF cavities replace
+  drifts (same length — transversely equivalent to a drift).
+- **Arc:** FODO cells with dipoles inserted within drift spaces. Optional
+  sextupoles placed near quads for chromaticity correction (K2 sign matches
+  the adjacent quad's K1 sign).
 
-Everything else is a special case of these two rules.
+**Algorithm:**
 
+1. **Sample section layout.** `n_sections` ~ {2, 3}, each independently typed as
+   straight or arc.
 
-### 3.4 Structured generation (50% of data)
+2. **Sample cell design per section:**
+   - Phase advance μ ~ Uniform(20°, 80°)
+   - Quad length L_q ~ Uniform(0.1, 0.5) m
+   - Drift-equivalent length L_d ~ Uniform(0.75, 2.5) m
+   - K1 derived from thin-lens FODO stability:
+     `K1 = sqrt(2(1-cos(μ))) / ((L_d + L_q) · L_q)`
+   - Per-cell perturbation amplitude σ_pert ~ Uniform(0, 0.25)
 
-The generator works as follows:
+3. **Allocate half-cells to sections.** Each section gets a minimum of 2
+   half-cells (one full FODO cell). Remaining element budget is distributed
+   randomly, one half-cell at a time, until `seq_len` is reached.
 
-1. Lay down an alternating quad backbone: `QF - QD - QF - QD - ...`
-2. Insert drifts between every element.
-3. Optionally insert dipoles, RF cavities, or sextupoles at random positions
-   between the quads.
-4. Randomize all parameters independently from the ranges in Section 1.
+4. **Build half-cells.** Each half-cell is one quad followed by a drift space:
+   - K1 and L_d are perturbed per half-cell: `K1' = K1 · (1 + N(0, σ_pert))`
+   - **Straight drift space:** one drift element (or RF cavity with same length)
+   - **Arc drift space:** drift + bend + drift (splitting L_d to preserve total
+     length), optionally preceded by a sextupole near the quad
+   - Quad sign alternates continuously across all sections
 
-This is NOT a periodic lattice — every element gets independent random parameters.
-The only structural constraint is the two rules above.
+5. **Truncate to `seq_len`.**
 
-The named lattice types are just variations on step 3:
+**Half-cell element counts:**
 
-**FODO-like.** Only quads and drifts. The simplest case.
+| Type | Elements per half-cell |
+|------|------------------------|
+| Straight | 2 (quad + drift) |
+| Straight + RF | 2 (quad + RF) |
+| Arc | 4 (quad + drift + bend + drift) |
+| Arc + sextupole | 5 (quad + sext + drift + bend + drift) |
+
+**Example lattice (seq_len=32):**
 
 ```
-Q(K1=+2.3, L=0.20) - drift(L=1.7) - Q(K1=-3.1, L=0.35) - drift(L=0.8) - Q(K1=+1.9, L=0.15) - ...
+Section 1 (straight, μ=45°, 5 half-cells):
+  QF - Drift - QD - Drift - QF - RF - QD - Drift - QF - Drift
+
+Section 2 (arc, μ=60°, 4 half-cells):
+  QD - D - Bend - D - QF - Sext - D - Bend - D - QD - D - Bend - D - QF - D - Bend - D
+
+[truncated to 32 elements]
 ```
 
-Note: K1 magnitudes differ between quads, drift lengths vary, nothing repeats. The
-only constraint is alternating K1 sign.
+**Initial beam matching.** The periodic Twiss of the first section's cell is
+computed as a reference:
+- `beta_max = L_half · (1 + sin(μ/2)) / sin(μ)` (at QF)
+- `beta_min = L_half · (1 - sin(μ/2)) / sin(μ)` (at QD)
 
-**Transport arc.** Insert dipoles between some quad-drift pairs.
+Initial Twiss is set to B_mag times the periodic solution, where B_mag ~
+LogUniform(1, 5) controls mismatch:
+- B_mag = 1: perfectly matched, smooth envelope
+- B_mag = 5: large envelope oscillations, but bounded
 
-```
-dipole - drift - QF - drift - QD - drift - dipole - drift - QF - ...
-```
+**What diversity comes from:**
 
-This adds bending and dispersion to the dynamics.
+| Dimension | Range | Effect on dynamics |
+|-----------|-------|-------------------|
+| Phase advance μ | 20°-80° | Focusing strength, beta functions |
+| Cell perturbation σ | 0-25% | Cell-to-cell variation, envelope beating |
+| Section transitions | Different μ, K1 per section | Non-periodic dynamics, optics mismatch |
+| B_mag (beam mismatch) | 1-5 | Envelope oscillation amplitude |
+| Dipoles in arcs | Angle 0.01-0.15 rad | Dispersion, chromatic beam size |
+| Sextupoles near quads | K2L 0.1-1.5 m^-2 | Nonlinear chromaticity correction |
+| RF in straights | 0.1-5 MV, 0.1-3 GHz | Energy change, longitudinal dynamics |
+| Emittance | 0.1 nm - 10 μm·rad | Absolute beam size |
+| Energy spread | 10^-4 - 5×10^-3 | Chromatic effects |
 
-**Linac-like.** Insert RF cavities between some quad-drift pairs.
-
-```
-RF - drift - QF - drift - RF - drift - QD - drift - ...
-```
-
-This adds acceleration and longitudinal dynamics.
-
-These categories can be mixed — a lattice can contain both dipoles and RF cavities.
-The categories are a guide for ensuring diversity, not rigid templates.
-
-
-### 3.5 Fully random lattices (30% of data)
-
-Drop both structural rules. Sample element type per slot independently:
-
-- 40% drift, 30% quadrupole, 15% dipole, 10% sextupole, 5% RF cavity
-- Sample each element's parameters independently from the ranges in Section 1
-
-Most of these will produce beam blowup. Apply the beam size cap filter (Section 4.1)
-and keep the survivors. Expect to discard 50-80% of generated lattices.
-
-The surviving random lattices provide dynamics that the structured generator cannot
-produce — unusual element orderings that happen to be stable, asymmetric focusing
-patterns, and other edge cases that improve model generalization.
+**Performance (1000 samples, seq_len=32):**
+- Median growth factor: 13.5x (vs 500x for structured, 91x for FODO)
+- 87% of samples have growth < 100x
+- 100% survival, all beams stay below 10 cm RMS
+- Median final RMS: 0.76 mm
 
 
-### 3.6 Challenging dynamics (20% of data)
+### 3.4 Legacy modes
 
-Deliberately construct lattices near interesting dynamical regimes:
+These modes are retained for backward compatibility and experimentation.
 
-- **Near-unstable optics:** Use the structured generator but push quad strengths
-  toward the upper range (K1 near 5) where beta functions grow rapidly between
-  quads. The beam stays contained but is near the stability boundary.
-- **Strong chromatic effects:** High K1 combined with large energy spread beams
-  (sigma_delta near 10^-2). Chromaticity causes different-energy particles to
-  experience different focusing, spreading the beam in phase space.
-- **Nonlinear-dominated:** Sextupoles at higher strengths (K2 up to 20, pushing
-  the perturbative boundary) placed near quads where dispersion is large.
+**`structured` mode:** Alternating-quad backbone with independently sampled K1 and
+drift lengths. Optional insertions of dipoles, RF, and sextupoles. Produces large
+beam blowup (median 500x growth) because cell-to-cell phase advance varies wildly.
+
+**`fodo` mode:** Quads and drifts only, independently sampled parameters.
+Median growth ~91x.
+
+**`random` mode:** Fully random element types and parameters. Most samples produce
+immediate blowup.
 
 
-### 3.7 Sequence length
+### 3.5 Sequence length
 
-Fixed `seq_len` per dataset (e.g., 50, 100, or 200 elements). Can vary across
-datasets if training for length generalization. 50-100 is a reasonable starting
-point — enough elements for interesting dynamics without excessive computational
-cost.
+The recommended starting sequence length is **32 elements**. This fits 2-3 sections
+with 2-4 FODO cells each — enough for envelope oscillations, section transitions,
+and diverse dynamics. Powers of 2 are preferred for efficient tensor operations.
+
+Scale up to 48 or 64 once the pipeline is validated.
 
 
 ---
 
 ## 4. Filtering
 
-Since these are open lattices without apertures, particles are never lost.
-However, some lattices produce dynamics that are not useful for training:
+With sectioned generation, most lattices produce well-behaved dynamics by
+construction. Filtering is still useful to remove the occasional outlier.
 
 ### 4.1 Beam size cap
 
-Track the beam sigma matrix (linear transport, no particles needed) through the
-lattice. Discard if the RMS beam size exceeds a threshold at any point:
+Discard samples where the final RMS beam size exceeds a threshold (e.g., 10 cm).
+With sectioned generation, ~100% of samples stay below this.
 
-```
-sigma_x = sqrt(emittance * beta_x_transported) > threshold
-```
-
-**Recommended threshold: 100x the initial beam size.** Beyond this the dynamics are
-purely exponential blowup. The model can learn "beam grows" from moderate growth;
-it does not need to see sigma go from microns to meters.
-
-This filter primarily rejects Tier 2 (random) lattices with unfortunate quad
-arrangements. Tier 1 lattices will rarely be rejected.
+For legacy modes, a growth factor cap (e.g., 100x initial beam size) is more
+appropriate since most samples blow up.
 
 ### 4.2 Trivial dynamics filter
 
@@ -489,10 +503,11 @@ Optionally discard lattices where the beam changes by less than 1% (e.g., a
 sequence of very weak elements that is effectively all drifts). These add bulk
 to the dataset without teaching the model anything.
 
-### 4.3 No survival filter needed
+### 4.3 Particle survival
 
-With no apertures, all particles survive by definition. Do NOT filter on particle
-survival — it is not meaningful here.
+With the default 100 m Bmad aperture, essentially all particles survive even in
+blown-up lattices. Particle survival is not a useful quality metric. Beam size
+growth is the relevant indicator of data quality.
 
 
 ---

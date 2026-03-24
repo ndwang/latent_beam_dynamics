@@ -34,50 +34,325 @@ VRF_RANGE = (0.1, 5.0)     # MV
 FRF_RANGE = (0.1, 3.0)     # GHz
 PHIRF_RANGE = (-np.pi / 6, np.pi / 6)  # rad
 
+# --- Sectioned lattice ranges ---
 
-def _sample_drift(rng: np.random.Generator) -> np.ndarray:
+MU_RANGE = (np.radians(20), np.radians(80))  # phase advance per cell
+L_HALF_CELL = (0.75, 2.5)   # half-cell drift-equivalent length (m)
+SIGMA_PERT_RANGE = (0.0, 0.25)  # per-cell perturbation amplitude
+P_RF_RANGE = (0.0, 0.3)     # probability of RF in straight half-cells
+P_SEXT_RANGE = (0.0, 0.3)   # probability of sextupole in arc half-cells
+
+
+# ==========================================================================
+# Element constructors (fixed parameters)
+# ==========================================================================
+
+def _make_drift(L: float) -> np.ndarray:
     e = np.zeros(ELEMENT_DIM)
-    e[I_L] = rng.uniform(*L_DRIFT)
-    return e
-
-
-def _sample_quad(rng: np.random.Generator, sign: int = 0) -> np.ndarray:
-    e = np.zeros(ELEMENT_DIM)
-    L = rng.uniform(*L_QUAD)
-    k1l = rng.uniform(*K1L_RANGE)
-    if sign == 0:
-        sign = rng.choice([-1, 1])
     e[I_L] = L
-    e[I_K1] = sign * k1l / L
     return e
 
 
-def _sample_sextupole(rng: np.random.Generator) -> np.ndarray:
+def _make_quad(L: float, K1: float) -> np.ndarray:
     e = np.zeros(ELEMENT_DIM)
-    L = rng.uniform(*L_SEXT)
-    k2l = rng.uniform(*K2L_RANGE)
     e[I_L] = L
-    e[I_K2] = k2l / L * rng.choice([-1, 1])
+    e[I_K1] = K1
     return e
 
 
-def _sample_dipole(rng: np.random.Generator) -> np.ndarray:
+def _make_bend(L: float, angle: float) -> np.ndarray:
     e = np.zeros(ELEMENT_DIM)
-    e[I_L] = rng.uniform(*L_DIPOLE)
-    e[I_ANGLE] = rng.uniform(*ANGLE_RANGE)
+    e[I_L] = L
+    e[I_ANGLE] = angle
     return e
 
 
-def _sample_rf(rng: np.random.Generator) -> np.ndarray:
+def _make_sextupole(L: float, K2: float) -> np.ndarray:
     e = np.zeros(ELEMENT_DIM)
-    e[I_L] = rng.uniform(*L_RF)
+    e[I_L] = L
+    e[I_K2] = K2
+    return e
+
+
+def _make_rf(L: float, rng: np.random.Generator) -> np.ndarray:
+    e = np.zeros(ELEMENT_DIM)
+    e[I_L] = L
     e[I_VRF] = np.exp(rng.uniform(np.log(VRF_RANGE[0]), np.log(VRF_RANGE[1])))
     e[I_FRF] = np.exp(rng.uniform(np.log(FRF_RANGE[0]), np.log(FRF_RANGE[1])))
     e[I_PHIRF] = rng.uniform(*PHIRF_RANGE)
     return e
 
 
-# --- Structured lattice ---
+# ==========================================================================
+# Element constructors (randomly sampled parameters) — used by legacy modes
+# ==========================================================================
+
+def _sample_drift(rng: np.random.Generator) -> np.ndarray:
+    return _make_drift(rng.uniform(*L_DRIFT))
+
+
+def _sample_quad(rng: np.random.Generator, sign: int = 0) -> np.ndarray:
+    L = rng.uniform(*L_QUAD)
+    k1l = rng.uniform(*K1L_RANGE)
+    if sign == 0:
+        sign = rng.choice([-1, 1])
+    return _make_quad(L, sign * k1l / L)
+
+
+def _sample_sextupole(rng: np.random.Generator) -> np.ndarray:
+    L = rng.uniform(*L_SEXT)
+    k2l = rng.uniform(*K2L_RANGE)
+    return _make_sextupole(L, k2l / L * rng.choice([-1, 1]))
+
+
+def _sample_dipole(rng: np.random.Generator) -> np.ndarray:
+    return _make_bend(rng.uniform(*L_DIPOLE), rng.uniform(*ANGLE_RANGE))
+
+
+def _sample_rf(rng: np.random.Generator) -> np.ndarray:
+    return _make_rf(rng.uniform(*L_RF), rng)
+
+
+# ==========================================================================
+# Sectioned lattice
+# ==========================================================================
+
+def _fodo_k1(mu: float, L_q: float, L_d: float) -> float:
+    """Compute quad K1 from phase advance, quad length, and drift length.
+
+    Uses the thin-lens FODO relation:
+        cos(mu) = 1 - L_half^2 / (2 * f^2)
+    where L_half = L_d + L_q is the half-cell center-to-center distance
+    and f = 1 / (K1 * L_q) is the focal length.
+
+    Args:
+        mu: Phase advance per cell (rad), must be in (0, pi).
+        L_q: Quad length (m).
+        L_d: Drift-equivalent length between quads (m).
+
+    Returns:
+        K1 in m^-2 (always positive; sign assigned by caller).
+    """
+    L_half = L_d + L_q
+    # 1/f = sqrt(2 * (1 - cos(mu))) / L_half
+    inv_f = np.sqrt(2.0 * (1.0 - np.cos(mu))) / L_half
+    return inv_f / L_q
+
+
+def fodo_periodic_twiss(mu: float, L_half: float) -> tuple[float, float]:
+    """Compute periodic Twiss at the focusing quad center.
+
+    Thin-lens FODO result:
+        beta_max = L_half * (1 + sin(mu/2)) / sin(mu)
+        beta_min = L_half * (1 - sin(mu/2)) / sin(mu)
+
+    Args:
+        mu: Phase advance per cell (rad).
+        L_half: Half-cell center-to-center distance (m).
+
+    Returns:
+        (beta_x, beta_y) at the QF location.
+        beta_x = beta_max (beam is wide in the focusing plane at QF),
+        beta_y = beta_min (beam is narrow in the defocusing plane at QF).
+    """
+    sin_mu = np.sin(mu)
+    sin_half = np.sin(mu / 2.0)
+    beta_max = L_half * (1.0 + sin_half) / sin_mu
+    beta_min = L_half * (1.0 - sin_half) / sin_mu
+    return beta_max, beta_min
+
+
+def _build_straight_half_cell(
+    L_q: float, K1: float, quad_sign: int, L_d: float,
+    p_rf: float, rng: np.random.Generator,
+) -> list[np.ndarray]:
+    """Build one straight half-cell: quad + drift (or RF).
+
+    With probability p_rf, the drift is replaced by an RF cavity of the
+    same length (transversely equivalent to a drift).
+    """
+    elements = [_make_quad(L_q, quad_sign * K1)]
+    if rng.random() < p_rf:
+        elements.append(_make_rf(L_d, rng))
+    else:
+        elements.append(_make_drift(L_d))
+    return elements  # 2 elements
+
+
+def _build_arc_half_cell(
+    L_q: float, K1: float, quad_sign: int, L_d: float,
+    base_angle: float, p_sext: float, rng: np.random.Generator,
+) -> list[np.ndarray]:
+    """Build one arc half-cell: quad + [sext] + drift + bend + drift.
+
+    The drift space of length L_d is split into drift + bend + drift,
+    preserving the total drift-equivalent length. Optionally a sextupole
+    is placed near the quad (its sign matches the quad sign).
+
+    Args:
+        L_q: Quad length (m).
+        K1: Quad strength (m^-2), positive. Sign applied via quad_sign.
+        quad_sign: +1 for QF, -1 for QD.
+        L_d: Total drift-equivalent length (m).
+        base_angle: Bend angle for this section (rad).
+        p_sext: Probability of inserting a sextupole.
+        rng: Random generator.
+    """
+    elements = [_make_quad(L_q, quad_sign * K1)]
+
+    # Sextupole near quad (sign matches quad for chromaticity correction)
+    if rng.random() < p_sext:
+        sext_L = rng.uniform(*L_SEXT)
+        sext_L = min(sext_L, L_d * 0.25)  # don't eat too much drift
+        k2l = rng.uniform(*K2L_RANGE)
+        elements.append(_make_sextupole(sext_L, quad_sign * k2l / sext_L))
+        L_remaining = L_d - sext_L
+    else:
+        L_remaining = L_d
+
+    # Split remaining space: drift + bend + drift
+    bend_frac = rng.uniform(0.3, 0.6)
+    bend_L = L_remaining * bend_frac
+    drift_total = L_remaining - bend_L
+    split = rng.uniform(0.3, 0.7)
+    d1 = drift_total * split
+    d2 = drift_total - d1
+
+    # Perturb bend angle slightly
+    angle = base_angle * (1.0 + rng.normal(0, 0.1))
+    angle = max(0.005, angle)
+
+    elements.append(_make_drift(d1))
+    elements.append(_make_bend(bend_L, angle))
+    elements.append(_make_drift(d2))
+
+    return elements  # 4 or 5 elements
+
+
+def sample_sectioned_lattice(
+    seq_len: int, rng: np.random.Generator,
+) -> tuple[np.ndarray, dict]:
+    """Generate a lattice from stitched FODO-based sections.
+
+    Each section is a stable FODO channel with its own phase advance,
+    cell length, and element insertions. Sections can be:
+      - straight: quads + drifts, optional RF cavities
+      - arc: quads + drifts + dipoles, optional sextupoles
+
+    The lattice always starts at a half-cell boundary (quad first).
+
+    Args:
+        seq_len: Target number of elements.
+        rng: NumPy random generator.
+
+    Returns:
+        elements: (seq_len, 7) element parameter array.
+        lattice_info: Dictionary with section metadata and periodic Twiss
+            of the first section (for initial beam matching).
+    """
+    # --- 1. Sample section layout ---
+    n_sections = rng.integers(2, 4)  # 2 or 3
+    section_types = rng.choice(["straight", "arc"], size=n_sections)
+
+    # --- 2. Sample cell parameters per section ---
+    sections = []
+    for stype in section_types:
+        mu = rng.uniform(*MU_RANGE)
+        L_q = rng.uniform(*L_QUAD)
+        L_d = rng.uniform(*L_HALF_CELL)
+        K1 = _fodo_k1(mu, L_q, L_d)
+        sigma_pert = rng.uniform(*SIGMA_PERT_RANGE)
+
+        sec = {
+            "type": str(stype),
+            "mu": float(mu),
+            "L_q": float(L_q),
+            "L_d": float(L_d),
+            "K1": float(K1),
+            "sigma_pert": float(sigma_pert),
+        }
+
+        if stype == "straight":
+            sec["p_rf"] = float(rng.uniform(*P_RF_RANGE))
+        else:
+            sec["p_sext"] = float(rng.uniform(*P_SEXT_RANGE))
+            sec["base_angle"] = float(rng.uniform(*ANGLE_RANGE))
+
+        sections.append(sec)
+
+    # --- 3. Allocate half-cells per section ---
+    # Cost per half-cell: straight = 2 elements, arc = 4 (average, ignoring sext)
+    costs = [2 if s["type"] == "straight" else 4 for s in sections]
+
+    # Start with minimum 2 half-cells (1 full FODO cell) per section
+    half_cells = [2] * n_sections
+    budget_used = sum(half_cells[i] * costs[i] for i in range(n_sections))
+
+    # Distribute remaining budget randomly
+    remaining = seq_len - budget_used
+    while remaining > 0:
+        eligible = [i for i in range(n_sections) if costs[i] <= remaining]
+        if not eligible:
+            break
+        i = rng.choice(eligible)
+        half_cells[i] += 1
+        remaining -= costs[i]
+
+    # --- 4. Build elements ---
+    elements = []
+    quad_sign = 1  # always start with QF
+
+    for sec_idx, sec in enumerate(sections):
+        for _ in range(half_cells[sec_idx]):
+            if len(elements) >= seq_len:
+                break
+
+            # Per-cell perturbation
+            K1_pert = sec["K1"] * (1.0 + rng.normal(0, sec["sigma_pert"]))
+            K1_pert = max(K1_pert, 0.1)  # keep focusing positive
+            L_d_pert = sec["L_d"] * (1.0 + rng.normal(0, sec["sigma_pert"] * 0.5))
+            L_d_pert = max(0.2, L_d_pert)
+
+            if sec["type"] == "straight":
+                hc = _build_straight_half_cell(
+                    sec["L_q"], K1_pert, quad_sign, L_d_pert,
+                    sec["p_rf"], rng,
+                )
+            else:
+                hc = _build_arc_half_cell(
+                    sec["L_q"], K1_pert, quad_sign, L_d_pert,
+                    sec["base_angle"], sec["p_sext"], rng,
+                )
+
+            elements.extend(hc)
+            quad_sign *= -1
+
+    # Truncate to exactly seq_len (may cut last half-cell short)
+    elements = elements[:seq_len]
+
+    # Pad with drifts if under budget (rare, from rounding)
+    while len(elements) < seq_len:
+        elements.append(_make_drift(rng.uniform(0.5, 1.5)))
+
+    # --- 5. Compute first section's periodic Twiss for beam matching ---
+    first = sections[0]
+    L_half = first["L_d"] + first["L_q"]
+    beta_x_ref, beta_y_ref = fodo_periodic_twiss(first["mu"], L_half)
+
+    lattice_info = {
+        "sections": sections,
+        "half_cells_per_section": [int(h) for h in half_cells],
+        "beta_x_periodic": float(beta_x_ref),
+        "beta_y_periodic": float(beta_y_ref),
+        "mu_first_section": float(first["mu"]),
+    }
+
+    return np.array(elements), lattice_info
+
+
+# ==========================================================================
+# Legacy lattice modes (kept for backward compatibility)
+# ==========================================================================
 
 def sample_structured_lattice(seq_len: int, rng: np.random.Generator) -> np.ndarray:
     """Generate a structured lattice with alternating-quad backbone.
@@ -128,7 +403,33 @@ def sample_structured_lattice(seq_len: int, rng: np.random.Generator) -> np.ndar
             if len(elements) >= seq_len:
                 break
             elements.append(_sample_drift(rng))
-        # else: nothing extra, next iteration adds quad
+
+    elements = elements[:seq_len]
+    return np.array(elements)
+
+
+def sample_fodo_lattice(seq_len: int, rng: np.random.Generator) -> np.ndarray:
+    """Generate an alternating-quad lattice with only quads and drifts.
+
+    Layout: Q_F - drift - Q_D - drift - Q_F - drift - ...
+    Same parameter ranges as structured mode but no dipoles, RF, or sextupoles.
+
+    Args:
+        seq_len: Number of elements in the lattice.
+        rng: NumPy random generator.
+
+    Returns:
+        (seq_len, 7) array of element parameters.
+    """
+    elements = []
+    quad_sign = rng.choice([-1, 1])
+
+    while len(elements) < seq_len:
+        elements.append(_sample_quad(rng, sign=quad_sign))
+        quad_sign *= -1
+        if len(elements) >= seq_len:
+            break
+        elements.append(_sample_drift(rng))
 
     elements = elements[:seq_len]
     return np.array(elements)
@@ -169,7 +470,9 @@ def sample_random_lattice(seq_len: int, rng: np.random.Generator) -> np.ndarray:
     return elements
 
 
-# --- Bmad file writer ---
+# ==========================================================================
+# Bmad file writer
+# ==========================================================================
 
 def write_bmad_lattice(
     element_params: np.ndarray,

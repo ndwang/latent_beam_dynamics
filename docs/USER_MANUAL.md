@@ -56,16 +56,23 @@ Generates random lattices and initial particle distributions.
 ```bash
 conda activate lbd_datagen
 
-# Structured lattices (alternating-quad backbone, physically realistic)
+# Sectioned lattices (recommended — stable FODO sections with matched beam)
+python scripts/generate_inputs.py \
+    --mode sectioned \
+    --n-samples 5000 \
+    --seq-len 32 \
+    --n-particles 100000 \
+    --output-dir data/sectioned \
+    --seed 42
+
+# Legacy: structured lattices (alternating-quad backbone, large beam blowup)
 python scripts/generate_inputs.py \
     --mode structured \
     --n-samples 5000 \
     --seq-len 50 \
-    --n-particles 100000 \
-    --output-dir data/structured \
-    --seed 42
+    --output-dir data/structured
 
-# Random lattices (independent element sampling, many will blow up)
+# Legacy: random lattices (independent element sampling, most will blow up)
 python scripts/generate_inputs.py \
     --mode random \
     --n-samples 5000 \
@@ -76,20 +83,20 @@ python scripts/generate_inputs.py \
 **Via SLURM:**
 
 ```bash
+sbatch slurm/generate_inputs.sh sectioned 5000 32
 sbatch slurm/generate_inputs.sh structured 5000 50
-sbatch slurm/generate_inputs.sh random 5000 50
 ```
 
 SLURM positional arguments: `<mode> <n_samples> [seq_len] [n_particles] [seed]`
-(seq_len defaults to 50, n_particles to 100000, seed to 42).
+(seq_len defaults to 32, n_particles to 100000, seed to 42).
 
 **Arguments:**
 
 | Argument | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `--mode` | Yes | — | `structured` or `random` |
+| `--mode` | Yes | — | `sectioned`, `structured`, `random`, or `fodo` |
 | `--n-samples` | Yes | — | Number of lattice-beam pairs to generate |
-| `--seq-len` | No | 50 | Number of elements per lattice |
+| `--seq-len` | No | 32 | Number of elements per lattice |
 | `--n-particles` | No | 100000 | Particles per beam distribution |
 | `--output-dir` | Yes | — | Where to write sample directories |
 | `--seed` | No | 42 | Random seed for reproducibility |
@@ -97,13 +104,14 @@ SLURM positional arguments: `<mode> <n_samples> [seq_len] [n_particles] [seed]`
 **Output structure:**
 
 ```
-data/structured/
+data/sectioned/
 ├── metadata.json          # Generation parameters
 ├── 000000/
 │   ├── lattice.bmad       # Bmad lattice definition
 │   ├── beam.h5            # Initial particle distribution (HDF5)
 │   ├── elements.npy       # Element parameters (seq_len, 7)
-│   └── beam_params.json   # Sampled beam parameters
+│   ├── beam_params.json   # Sampled beam parameters
+│   └── lattice_info.json  # Section metadata and periodic Twiss (sectioned only)
 ├── 000001/
 │   └── ...
 └── ...
@@ -111,13 +119,21 @@ data/structured/
 
 **Choosing between modes:**
 
-- **`structured`**: Alternating focusing/defocusing quad backbone with drifts
-  between elements. Randomly inserts dipoles, RF cavities, and sextupoles.
-  Produces physically realistic dynamics. Most samples are usable.
-- **`random`**: Independent element type sampling. Produces unusual dynamics
-  but 50-80% of samples will have beam blowup. These are filtered in Stage 3.
+- **`sectioned`** (recommended): Lattice built from 2-3 stitched FODO sections,
+  each with a stable cell design derived from a sampled phase advance (20°-80°).
+  Sections can be straight (quads + drifts, optional RF) or arc (quads + drifts +
+  dipoles, optional sextupoles). Initial beam is approximately matched to the
+  lattice with controlled mismatch (B_mag 1-5). Produces well-behaved dynamics:
+  median beam growth ~14x, all beams stay below 10 cm RMS.
+- **`structured`** (legacy): Alternating-quad backbone with independently sampled
+  parameters. Large beam blowup (median ~500x growth) due to cell-to-cell
+  phase advance variation.
+- **`random`** (legacy): Independent element type sampling. Most samples produce
+  immediate blowup.
+- **`fodo`** (legacy): Quads and drifts only, independently sampled.
 
-See `docs/DATA_GENERATION.md` for the physics behind all parameter ranges.
+See `docs/DATA_GENERATION.md` for the physics behind all parameter ranges and the
+sectioned generation algorithm.
 
 
 ### Stage 2: Track Particles Through Bmad/Tao
@@ -175,11 +191,54 @@ particle coordinates at every element boundary.
 
 ```bash
 # Count completed samples
-find data/structured -name "beam_dump.h5" | wc -l
+find data/sectioned -name "beam_dump.h5" | wc -l
 
 # Check the GNU Parallel job log
-cat data/structured/tracking.log
+cat data/sectioned/tracking.log
 ```
+
+
+### Post-Tracking Diagnostics
+
+After Stage 2 completes, run diagnostics to assess data quality before
+proceeding to encoding.
+
+**Quick survival check:**
+
+```bash
+python scripts/scan_alive.py --data-dir data/sectioned --output data/sectioned/alive.png
+```
+
+**Full diagnostics (recommended):**
+
+```bash
+python scripts/analyze_data.py --data-dir data/sectioned
+```
+
+This produces:
+- Text report: survival stats, beam size distribution, growth factors,
+  element composition, growth by section configuration
+- Plot: `data/sectioned/diagnostics/diagnostics.png` with 6 panels:
+  growth histogram, beam size histogram, survival histogram,
+  initial vs final beam size, mismatch vs growth, growth CDF
+
+**Arguments:**
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--data-dir` | Yes | — | Directory with tracked sample subdirs |
+| `--output-dir` | No | `<data-dir>/diagnostics` | Where to save plots |
+| `--max-samples` | No | all | Limit samples for faster analysis |
+
+**What to look for:**
+- Median growth < 50x (sectioned mode typically gives ~14x)
+- All beams < 10 cm RMS (ensures VAE can resolve the beam)
+- >90% of samples with growth < 100x
+- Straight-only sections should have lowest growth (~5x)
+- Arc sections should have moderate growth (~15-25x)
+
+If growth is too large, check the lattice generation parameters in
+`src/datagen/lattice.py` (phase advance range, perturbation amplitude).
 
 
 ### Stage 3: Encode Tracked Data with VAE
@@ -233,19 +292,33 @@ The script reports how many were skipped at the end.
 ### Complete Example: End to End
 
 ```bash
-# 1. Generate 5000 structured lattice-beam pairs
-sbatch slurm/generate_inputs.sh structured 5000 50
+conda activate lbd_datagen
 
-# 2. Track particles (submit after Stage 1 completes)
-sbatch slurm/track_beam.sh data/structured
+# 1. Generate 5000 sectioned lattice-beam pairs
+python scripts/generate_inputs.py --mode sectioned --n-samples 5000 \
+    --seq-len 32 --output-dir data/sectioned
 
-# 3. Encode with VAE (submit after Stage 2 completes)
-sbatch slurm/encode_tracked.sh data/structured data/structured_encoded
+# 2. Track particles (direct with GNU Parallel, or submit via SLURM)
+export OMP_NUM_THREADS=1
+find data/sectioned -mindepth 1 -maxdepth 1 -type d | sort | \
+    parallel -j$(nproc) bash scripts/track_one.sh {}
+# or: sbatch slurm/track_beam.sh data/sectioned
 
-# 4. Train model on the resulting data
-sbatch slurm/submit_single.sh   # edit OVERRIDES in the script first
-# or directly:
-python scripts/train.py data.path=data/structured_encoded
+# 3. Run diagnostics to verify data quality
+python scripts/analyze_data.py --data-dir data/sectioned
+
+# 4. Encode with VAE (submit after Stage 2 completes)
+conda activate vae
+python scripts/encode_tracked.py \
+    --input-dir data/sectioned \
+    --vae-checkpoint /pscratch/sd/n/ndwang/vae/runs/baseline_20260127/baseline_20260127_best.pth \
+    --output-dir data/sectioned_encoded
+# or: sbatch slurm/encode_tracked.sh data/sectioned data/sectioned_encoded
+
+# 5. Train model on the resulting data
+conda activate lbd
+python scripts/train.py data.path=data/sectioned_encoded
+# or: sbatch slurm/submit_single.sh   # edit OVERRIDES in the script first
 ```
 
 ---
@@ -355,11 +428,13 @@ python scripts/check_models.py
 
 | Task | Command |
 |------|---------|
-| Generate structured inputs | `sbatch slurm/generate_inputs.sh structured 5000 50` |
-| Generate random inputs | `sbatch slurm/generate_inputs.sh random 5000 50` |
-| Track particles | `sbatch slurm/track_beam.sh data/structured` |
-| Encode with VAE | `sbatch slurm/encode_tracked.sh data/structured data/structured_encoded` |
-| Train model | `python scripts/train.py data.path=data/structured_encoded` |
+| Generate sectioned inputs | `python scripts/generate_inputs.py --mode sectioned --n-samples 5000 --output-dir data/sectioned` |
+| Track particles (parallel) | `find data/sectioned -mindepth 1 -maxdepth 1 -type d \| sort \| parallel -j$(nproc) bash scripts/track_one.sh {}` |
+| Track particles (SLURM) | `sbatch slurm/track_beam.sh data/sectioned` |
+| Run diagnostics | `python scripts/analyze_data.py --data-dir data/sectioned` |
+| Quick survival check | `python scripts/scan_alive.py --data-dir data/sectioned` |
+| Encode with VAE | `sbatch slurm/encode_tracked.sh data/sectioned data/sectioned_encoded` |
+| Train model | `python scripts/train.py data.path=data/sectioned_encoded` |
 | Train via SLURM | `sbatch slurm/submit_single.sh` |
 | Resume training | `python scripts/train.py data.path=... --resume runs/.../lbd_best.pth` |
 | Sync W&B | `./slurm/sync_wandb.sh` |

@@ -7,13 +7,16 @@ Usage:
     python scripts/generate_inputs.py --mode structured --n-samples 5000 \
         --seq-len 50 --output-dir data/structured
 
-    python scripts/generate_inputs.py --mode random --n-samples 5000 \
-        --seq-len 50 --output-dir data/random
+    # Control parallelism (default: all CPUs)
+    python scripts/generate_inputs.py --mode sectioned --n-samples 10000 \
+        --output-dir data/sectioned --workers 64
 """
 
 import argparse
 import json
+import os
 import numpy as np
+from multiprocessing import Pool
 from pathlib import Path
 from tqdm import tqdm
 
@@ -30,6 +33,51 @@ from src.datagen.lattice import (
 from src.datagen.beam import sample_beam_params, sample_matched_beam_params, generate_particles
 
 
+LEGACY_SAMPLERS = {
+    'structured': sample_structured_lattice,
+    'random': sample_random_lattice,
+    'fodo': sample_fodo_lattice,
+}
+
+
+def _generate_one(args_tuple):
+    """Generate a single sample. Runs in a worker process.
+
+    Takes a single tuple for compatibility with Pool.imap_unordered.
+    """
+    idx, output_dir, mode, seq_len, n_particles, seed_seq = args_tuple
+    rng = np.random.default_rng(seed_seq)
+    sample_dir = output_dir / f"{idx:06d}"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+
+    if mode == 'sectioned':
+        elements, lattice_info = sample_sectioned_lattice(seq_len, rng)
+        beam_params = sample_matched_beam_params(rng, lattice_info)
+        with open(sample_dir / 'lattice_info.json', 'w') as f:
+            json.dump(lattice_info, f, indent=2)
+    else:
+        elements = LEGACY_SAMPLERS[mode](seq_len, rng)
+        beam_params = sample_beam_params(rng)
+
+    write_bmad_lattice(
+        elements,
+        energy_GeV=beam_params['energy_GeV'],
+        output_path=sample_dir / 'lattice.bmad',
+    )
+    generate_particles(
+        beam_params,
+        n_particles=n_particles,
+        output_path=sample_dir / 'beam.h5',
+    )
+    np.save(sample_dir / 'elements.npy', elements)
+
+    beam_params_serializable = {k: float(v) for k, v in beam_params.items()}
+    with open(sample_dir / 'beam_params.json', 'w') as f:
+        json.dump(beam_params_serializable, f, indent=2)
+
+    return idx
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate Bmad input files")
     parser.add_argument('--mode', choices=['sectioned', 'structured', 'random', 'fodo'],
@@ -39,60 +87,36 @@ def main():
     parser.add_argument('--n-particles', type=int, default=100_000)
     parser.add_argument('--output-dir', type=str, required=True)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--workers', type=int, default=None,
+                        help="Number of parallel workers (default: all CPUs)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    rng = np.random.default_rng(args.seed)
+    # Spawn independent, deterministic seeds for each sample
+    parent_seq = np.random.SeedSequence(args.seed)
+    child_seeds = parent_seq.spawn(args.n_samples)
 
-    # Legacy modes use unmatched beam sampling
-    legacy_samplers = {
-        'structured': sample_structured_lattice,
-        'random': sample_random_lattice,
-        'fodo': sample_fodo_lattice,
-    }
+    n_workers = args.workers or os.cpu_count()
+    n_workers = min(n_workers, args.n_samples)
 
-    for i in tqdm(range(args.n_samples), desc=f"Generating {args.mode}"):
-        sample_dir = output_dir / f"{i:06d}"
-        sample_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Generating {args.n_samples} {args.mode} samples with {n_workers} workers")
 
-        if args.mode == 'sectioned':
-            # Sectioned mode: matched beam sampling
-            elements, lattice_info = sample_sectioned_lattice(args.seq_len, rng)
-            beam_params = sample_matched_beam_params(rng, lattice_info)
+    tasks = [
+        (i, output_dir, args.mode, args.seq_len, args.n_particles, child_seeds[i])
+        for i in range(args.n_samples)
+    ]
 
-            # Save lattice info (section structure, periodic Twiss)
-            with open(sample_dir / 'lattice_info.json', 'w') as f:
-                json.dump(lattice_info, f, indent=2)
-        else:
-            # Legacy modes
-            elements = legacy_samplers[args.mode](args.seq_len, rng)
-            beam_params = sample_beam_params(rng)
+    with Pool(n_workers) as pool:
+        for _ in tqdm(
+            pool.imap_unordered(_generate_one, tasks),
+            total=args.n_samples,
+            desc=f"Generating {args.mode}",
+        ):
+            pass
 
-        # Write Bmad lattice file
-        write_bmad_lattice(
-            elements,
-            energy_GeV=beam_params['energy_GeV'],
-            output_path=sample_dir / 'lattice.bmad',
-        )
-
-        # Generate and save particles
-        generate_particles(
-            beam_params,
-            n_particles=args.n_particles,
-            output_path=sample_dir / 'beam.h5',
-        )
-
-        # Save element parameters (used by Stage 3)
-        np.save(sample_dir / 'elements.npy', elements)
-
-        # Save beam params as JSON for reproducibility
-        beam_params_serializable = {
-            k: float(v) for k, v in beam_params.items()
-        }
-        with open(sample_dir / 'beam_params.json', 'w') as f:
-            json.dump(beam_params_serializable, f, indent=2)
+    print(f"Generated {args.n_samples} samples in {output_dir}")
 
     # Save generation metadata
     metadata = {
@@ -104,8 +128,6 @@ def main():
     }
     with open(output_dir / 'metadata.json', 'w') as f:
         json.dump(metadata, f, indent=2)
-
-    print(f"Generated {args.n_samples} samples in {output_dir}")
 
 
 if __name__ == '__main__':

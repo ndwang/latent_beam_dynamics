@@ -280,6 +280,13 @@ def generate_particles(
     G.run()
     P = G.particles
 
+    # Convert z -> t so Bmad sees the longitudinal spread.
+    # Bmad uses t (arrival time) not z at a fixed s-position.
+    # t = -z / (beta * c), then zero out z.
+    c = 299792458.0
+    P.t = -P.z / (P.beta * c)
+    P.z = np.zeros_like(P.z)
+
     if output_path is not None:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)

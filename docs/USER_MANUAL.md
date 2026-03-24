@@ -241,10 +241,66 @@ If growth is too large, check the lattice generation parameters in
 `src/datagen/lattice.py` (phase advance range, perturbation amplitude).
 
 
-### Stage 3: Encode Tracked Data with VAE
+### Stage 3a: Prepare VAE Training Data
 
-Reads tracked particle distributions, encodes each beam snapshot into a VAE
-latent vector, and produces the final `.npy` training files.
+Converts tracked particle snapshots into frequency maps for VAE training.
+Each beam snapshot becomes a 15-channel 64×64 image (all pairwise 2D
+projections of the 6D phase space) plus a 6-component scale vector.
+
+**Coordinate convention:** Particles are converted to Courant-Snyder
+trace-space coordinates before building frequency maps:
+
+| Index | Symbol | Description | Units |
+|-------|--------|-------------|-------|
+| 0 | x | Horizontal position | m |
+| 1 | x' | Horizontal angle (px / p_ref) | rad |
+| 2 | y | Vertical position | m |
+| 3 | y' | Vertical angle (py / p_ref) | rad |
+| 4 | z | Bunch-frame longitudinal position (−β·c·t, centered) | m |
+| 5 | δ | Relative momentum deviation ((pz − p_ref) / p_ref) | 1 |
+
+This removes the reference-energy dependence and puts all six dimensions
+in comparable ranges (~1e-7 to ~1e-1), suitable for the VAE scale head.
+
+**Direct:**
+
+```bash
+conda activate vae
+
+python scripts/prepare_vae_data.py \
+    --data-dir data/sectioned \
+    --output data/vae_training/sectioned \
+    --workers 128
+```
+
+**Arguments:**
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `--data-dir` | Yes | — | Directory with tracked sample subdirs |
+| `--output` | Yes | — | Output base path (produces `<path>_maps.npy`, `<path>_scales.npy`, `<path>_meta.json`) |
+| `--bins` | No | 64 | Histogram bins per axis |
+| `--n-sigma` | No | 4 | Grid extent in sigma |
+| `--workers` | No | all CPUs | Parallel workers |
+| `--max-samples` | No | all | Limit samples for testing |
+
+**Output:**
+
+```
+data/vae_training/
+├── sectioned_maps.npy     # (N_snapshots, 15, 64, 64) — frequency maps
+├── sectioned_scales.npy   # (N_snapshots, 6) — per-dimension std in trace-space
+└── sectioned_meta.json    # coordinate definitions and generation metadata
+```
+
+Each tracked sample produces ~33 snapshots (initial beam + 32 elements),
+so 10,000 samples yield ~330,000 frequency maps.
+
+
+### Stage 3b: Encode Tracked Data with VAE
+
+After the VAE is trained, encodes each beam snapshot into a latent vector
+and produces the final `.npy` training files for the dynamics model.
 
 **Direct:**
 
@@ -253,7 +309,7 @@ conda activate vae
 
 python scripts/encode_tracked.py \
     --input-dir data/structured \
-    --vae-checkpoint /pscratch/sd/n/ndwang/vae/runs/baseline_20260127/baseline_20260127_best.pth \
+    --vae-checkpoint /pscratch/sd/n/ndwang/vae/runs/<run>/vae_best.pth \
     --output-dir data/structured_encoded
 ```
 
@@ -261,11 +317,9 @@ python scripts/encode_tracked.py \
 
 ```bash
 sbatch slurm/encode_tracked.sh data/structured data/structured_encoded
-sbatch slurm/encode_tracked.sh data/random data/random_encoded
 ```
 
 SLURM positional arguments: `<input_dir> <output_dir> [vae_checkpoint]`
-(vae_checkpoint defaults to the baseline VAE).
 
 **Arguments:**
 
@@ -294,9 +348,9 @@ The script reports how many were skipped at the end.
 ```bash
 conda activate lbd_datagen
 
-# 1. Generate 5000 sectioned lattice-beam pairs
-python scripts/generate_inputs.py --mode sectioned --n-samples 5000 \
-    --seq-len 32 --output-dir data/sectioned
+# 1. Generate 10000 sectioned lattice-beam pairs
+python scripts/generate_inputs.py --mode sectioned --n-samples 10000 \
+    --seq-len 32 --output-dir data/sectioned --workers 128
 
 # 2. Track particles (direct with GNU Parallel, or submit via SLURM)
 export OMP_NUM_THREADS=1
@@ -307,15 +361,25 @@ find data/sectioned -mindepth 1 -maxdepth 1 -type d | sort | \
 # 3. Run diagnostics to verify data quality
 python scripts/analyze_data.py --data-dir data/sectioned
 
-# 4. Encode with VAE (submit after Stage 2 completes)
+# 4. Prepare VAE training data (convert to frequency maps)
+conda activate vae
+python scripts/prepare_vae_data.py \
+    --data-dir data/sectioned \
+    --output data/vae_training/sectioned --workers 128
+
+# 5. Train VAE on the frequency maps (submit to SLURM)
+cd /pscratch/sd/n/ndwang/vae
+sbatch slurm/submit_single.sh
+
+# 6. Encode with trained VAE
+cd /pscratch/sd/n/ndwang/latent_beam_dynamics
 conda activate vae
 python scripts/encode_tracked.py \
     --input-dir data/sectioned \
-    --vae-checkpoint /pscratch/sd/n/ndwang/vae/runs/baseline_20260127/baseline_20260127_best.pth \
+    --vae-checkpoint /pscratch/sd/n/ndwang/vae/runs/<run>/vae_best.pth \
     --output-dir data/sectioned_encoded
-# or: sbatch slurm/encode_tracked.sh data/sectioned data/sectioned_encoded
 
-# 5. Train model on the resulting data
+# 7. Train dynamics model on the resulting data
 conda activate lbd
 python scripts/train.py data.path=data/sectioned_encoded
 # or: sbatch slurm/submit_single.sh   # edit OVERRIDES in the script first
@@ -428,13 +492,14 @@ python scripts/check_models.py
 
 | Task | Command |
 |------|---------|
-| Generate sectioned inputs | `python scripts/generate_inputs.py --mode sectioned --n-samples 5000 --output-dir data/sectioned` |
+| Generate sectioned inputs | `python scripts/generate_inputs.py --mode sectioned --n-samples 10000 --output-dir data/sectioned --workers 128` |
 | Track particles (parallel) | `find data/sectioned -mindepth 1 -maxdepth 1 -type d \| sort \| parallel -j$(nproc) bash scripts/track_one.sh {}` |
 | Track particles (SLURM) | `sbatch slurm/track_beam.sh data/sectioned` |
 | Run diagnostics | `python scripts/analyze_data.py --data-dir data/sectioned` |
 | Quick survival check | `python scripts/scan_alive.py --data-dir data/sectioned` |
-| Encode with VAE | `sbatch slurm/encode_tracked.sh data/sectioned data/sectioned_encoded` |
-| Train model | `python scripts/train.py data.path=data/sectioned_encoded` |
+| Prepare VAE data | `python scripts/prepare_vae_data.py --data-dir data/sectioned --output data/vae_training/sectioned --workers 128` |
+| Encode with VAE | `python scripts/encode_tracked.py --input-dir data/sectioned --vae-checkpoint <path> --output-dir data/sectioned_encoded` |
+| Train dynamics model | `python scripts/train.py data.path=data/sectioned_encoded` |
 | Train via SLURM | `sbatch slurm/submit_single.sh` |
 | Resume training | `python scripts/train.py data.path=... --resume runs/.../lbd_best.pth` |
 | Sync W&B | `./slurm/sync_wandb.sh` |

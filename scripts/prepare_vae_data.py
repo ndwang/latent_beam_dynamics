@@ -15,14 +15,8 @@ where:
     x, y     — transverse position [m]
     x' = px / p_ref  — horizontal angle [rad]
     y' = py / p_ref  — vertical angle [rad]
-    z = -beta * c * (t - t_mean)  — bunch-frame longitudinal position [m]
-    delta = (pz - p_ref) / p_ref  — relative momentum deviation [1]
-
-p_ref is the mean pz of alive particles at each snapshot.
-
-This removes the reference-energy dependence from the scales, putting all
-six dimensions in comparable ranges (~1e-7 to ~1e-1) suitable for the
-VAE scale prediction head.
+    z = -beta * c * t  — bunch-frame longitudinal position [m] (t is already t - t_ref)
+    delta = (pz - p0c) / p0c  — relative momentum deviation [1] (p0c from HDF5)
 
 Usage:
     python scripts/prepare_vae_data.py --data-dir data/sectioned_10k \
@@ -75,28 +69,26 @@ def _process_sample(args_tuple):
                 if alive.sum() < 100:
                     continue
 
-                # Reference momentum: mean pz of alive particles
+                # Reference momentum from HDF5 design value
                 pz_alive = pg.pz[alive]
-                p_ref = pz_alive.mean()
+                h5_group = f[path + "electron"]
+                p0c = h5_group["totalMomentumOffset"].attrs["value"][0]
 
-                # Trace-space angles
-                xp = pg.px[alive] / p_ref
-                yp = pg.py[alive] / p_ref
+                xp = pg.px[alive] / p0c
+                yp = pg.py[alive] / p0c
 
-                # Relative momentum deviation
-                delta = (pz_alive - p_ref) / p_ref
+                delta = (pz_alive - p0c) / p0c
 
-                # Bunch-frame longitudinal position from arrival time
+                # t is already t - t_ref in the HDF5
                 z_bunch = -pg.beta[alive] * SPEED_OF_LIGHT * pg.t[alive]
-                z_bunch -= z_bunch.mean()
 
                 particles = np.column_stack([
                     pg.x[alive], xp, pg.y[alive], yp, z_bunch, delta,
                 ])
-                maps, scales = particles_to_frequency_maps(
+                maps, scales, centroids = particles_to_frequency_maps(
                     particles, bins=bins, n_sigma=n_sigma,
                 )
-                results.append((maps, scales))
+                results.append((maps, scales, centroids))
         return results
     except Exception as e:
         print(f"  Skip {sample_dir.name}: {e}")
@@ -145,6 +137,7 @@ def main():
 
     all_maps = []
     all_scales = []
+    all_centroids = []
     n_skipped = 0
 
     with Pool(n_workers) as pool:
@@ -157,9 +150,10 @@ def main():
             if result is None:
                 n_skipped += 1
                 continue
-            for maps, scales in result:
+            for maps, scales, centroids in result:
                 all_maps.append(maps)
                 all_scales.append(scales)
+                all_centroids.append(centroids)
 
     print(f"\nProcessed {len(sample_dirs) - n_skipped} samples, skipped {n_skipped}")
     print(f"Total frequency maps: {len(all_maps)}")
@@ -170,15 +164,19 @@ def main():
 
     maps_arr = np.array(all_maps, dtype=np.float32)
     scales_arr = np.array(all_scales, dtype=np.float32)
+    centroids_arr = np.array(all_centroids, dtype=np.float32)
 
     maps_path = f"{args.output}_maps.npy"
     scales_path = f"{args.output}_scales.npy"
+    centroids_path = f"{args.output}_centroids.npy"
 
     np.save(maps_path, maps_arr)
     np.save(scales_path, scales_arr)
+    np.save(centroids_path, centroids_arr)
 
-    print(f"Saved maps:   {maps_path}  shape={maps_arr.shape}")
-    print(f"Saved scales: {scales_path}  shape={scales_arr.shape}")
+    print(f"Saved maps:      {maps_path}  shape={maps_arr.shape}")
+    print(f"Saved scales:    {scales_path}  shape={scales_arr.shape}")
+    print(f"Saved centroids: {centroids_path}  shape={centroids_arr.shape}")
 
     # Save coordinate metadata for downstream consumers
     import json
@@ -190,8 +188,8 @@ def main():
             "Horizontal angle (px / p_ref)",
             "Vertical position",
             "Vertical angle (py / p_ref)",
-            "Bunch-frame longitudinal position (-beta*c*t, centered)",
-            "Relative momentum deviation ((pz - p_ref) / p_ref)",
+            "Bunch-frame longitudinal position (-beta*c*t)",
+            "Relative momentum deviation ((pz - p0c) / p0c)",
         ],
         "n_samples": len(all_maps),
         "maps_shape": list(maps_arr.shape),

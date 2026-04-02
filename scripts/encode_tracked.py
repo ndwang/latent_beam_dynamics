@@ -5,9 +5,9 @@ and produces the final z_traj.npy and elements.npy for training.
 
 Usage:
     python scripts/encode_tracked.py \
-        --input-dir data/structured \
-        --vae-checkpoint ../vae/runs/baseline_20260127/baseline_20260127_best.pth \
-        --output-dir data/structured_encoded
+        --input-dir data/sectioned_10k \
+        --vae-checkpoint ../vae/runs/beta_1e-5_260401_1523/beta_1e-5_260401_1523_best.pth \
+        --output-dir data/sectioned_10k_encoded
 """
 
 import argparse
@@ -30,7 +30,7 @@ def main():
                         help="Path to trained VAE .pth checkpoint")
     parser.add_argument('--output-dir', type=str, required=True,
                         help="Directory to write z_traj.npy and elements.npy")
-    parser.add_argument('--tracked-filename', type=str, default='tracked.h5',
+    parser.add_argument('--tracked-filename', type=str, default='beam_dump.h5',
                         help="Name of tracked HDF5 file in each sample dir")
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     args = parser.parse_args()

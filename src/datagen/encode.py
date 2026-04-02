@@ -4,55 +4,45 @@ Reads Bmad output HDF5 files containing particle coordinates at each
 element boundary, converts to frequency maps, and encodes with the VAE.
 """
 
-import sys
 import numpy as np
 import torch
 from pathlib import Path
-from pmd_beamphysics import ParticleGroup
 
-# Add VAE project to path
-VAE_ROOT = Path(__file__).resolve().parents[3] / 'vae'
-sys.path.insert(0, str(VAE_ROOT))
-
-from src.data.preprocessing import particles_to_frequency_maps
-from src.models.vae2d import VAE2D
+from beam_vae.data.preprocessing import particles_to_frequency_maps
+from beam_vae.models import VAE2D, ResidualVAE2D
+from beam_vae.utils.config import load_yaml
 
 
-def load_vae(checkpoint_path: str | Path, device: str = 'cpu') -> VAE2D:
+def load_vae(checkpoint_path: str | Path, device: str = 'cpu'):
     """Load a trained VAE model from checkpoint.
+
+    Loads config.yaml from the run directory to reconstruct the model.
 
     Args:
         checkpoint_path: Path to .pth checkpoint file.
         device: Device to load model on.
 
     Returns:
-        VAE2D model in eval mode.
+        VAE model in eval mode.
     """
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    checkpoint_path = Path(checkpoint_path)
+    run_dir = checkpoint_path.parent
+    config_path = run_dir / 'config.yaml'
 
-    # Extract model config from checkpoint if available
-    if 'config' in checkpoint:
-        config = checkpoint['config']
+    if config_path.exists():
+        config = load_yaml(config_path)
     else:
-        # Default config matching the trained model
-        config = {
-            'model': {
-                'input_channels': 15,
-                'hidden_channels': [32, 64, 128, 256, 512],
-                'latent_dim': 64,
-                'input_size': 64,
-                'kernel_size': 3,
-                'activation': 'relu',
-                'batch_norm': True,
-                'dropout_rate': 0.0,
-                'weight_init': 'kaiming_normal',
-                'output_activation': 'sigmoid',
-                'use_reparameterization': True,
-            }
-        }
+        raise FileNotFoundError(
+            f"No config.yaml found in {run_dir}. "
+            "Cannot reconstruct model architecture."
+        )
 
-    model = VAE2D(config)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model_name = config.get('model', {}).get('name', 'vae2d')
+    model_cls = ResidualVAE2D if model_name == 'residual_vae2d' else VAE2D
+
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model = model_cls(config)
+    model.load_state_dict(checkpoint['model_state_dict'], strict=False)
     model.to(device)
     model.eval()
     return model
@@ -60,7 +50,7 @@ def load_vae(checkpoint_path: str | Path, device: str = 'cpu') -> VAE2D:
 
 def particles_to_latent(
     particles: np.ndarray,
-    vae: VAE2D,
+    vae,
     device: str = 'cpu',
     bins: int = 64,
     n_sigma: int = 4,
@@ -68,7 +58,7 @@ def particles_to_latent(
     """Encode a single particle distribution into a latent vector.
 
     Args:
-        particles: (N, 6) array of [x, y, z, px, py, pz].
+        particles: (N, 6) array of [x, x', y, y', z, delta].
         vae: Loaded VAE model.
         device: Device for inference.
         bins: Histogram resolution.
@@ -77,20 +67,27 @@ def particles_to_latent(
     Returns:
         (latent_dim,) latent vector (mu, deterministic).
     """
-    maps, scales = particles_to_frequency_maps(particles, bins=bins, n_sigma=n_sigma)
+    maps, scales, centroids = particles_to_frequency_maps(
+        particles, bins=bins, n_sigma=n_sigma,
+    )
 
     maps_t = torch.from_numpy(maps.astype(np.float32)).unsqueeze(0).to(device)
     scales_t = torch.from_numpy(scales.astype(np.float32)).unsqueeze(0).to(device)
+    centroids_t = torch.from_numpy(centroids.astype(np.float32)).unsqueeze(0).to(device)
+
+    # Normalize scales/centroids if the model was trained with normalization
+    scales_t = vae.normalize_scales(scales_t)
+    centroids_t = vae.normalize_centroids(centroids_t)
 
     with torch.no_grad():
-        mu, _ = vae.encode(maps_t, scales_t)
+        mu, _ = vae.encode(maps_t, scales_t, centroids_t)
 
     return mu.squeeze(0).cpu().numpy()
 
 
 def encode_tracked_sample(
     tracked_h5_path: str | Path,
-    vae: VAE2D,
+    vae,
     device: str = 'cpu',
 ) -> np.ndarray:
     """Encode all beam snapshots from a tracked HDF5 file.
@@ -107,26 +104,36 @@ def encode_tracked_sample(
         (n_snapshots, latent_dim) array of latent vectors.
     """
     import h5py
+    from pmd_beamphysics import ParticleGroup
+    from pmd_beamphysics.readers import particle_paths
+
+    SPEED_OF_LIGHT = 299792458.0
 
     tracked_h5_path = Path(tracked_h5_path)
     latents = []
 
     with h5py.File(tracked_h5_path, 'r') as f:
-        # Bmad typically writes groups numbered by element index
-        group_names = sorted(f.keys(), key=_sort_key)
+        pp = particle_paths(f)
+        # Skip last snapshot (end marker, redundant)
+        for path in pp[:-1]:
+            pg = ParticleGroup(h5=f[path + "electron"])
+            alive = pg.status == 1
+            if alive.sum() < 100:
+                continue
 
-        for name in group_names:
-            P = ParticleGroup(h5=f[name])
-            coords = np.column_stack([P.x, P.y, P.z, P.px, P.py, P.pz])
-            z = particles_to_latent(coords, vae, device=device)
+            pz_alive = pg.pz[alive]
+            h5_group = f[path + "electron"]
+            p0c = h5_group["totalMomentumOffset"].attrs["value"][0]
+
+            xp = pg.px[alive] / p0c
+            yp = pg.py[alive] / p0c
+            delta = (pz_alive - p0c) / p0c
+            z_bunch = -pg.beta[alive] * SPEED_OF_LIGHT * pg.t[alive]
+
+            particles = np.column_stack([
+                pg.x[alive], xp, pg.y[alive], yp, z_bunch, delta,
+            ])
+            z = particles_to_latent(particles, vae, device=device)
             latents.append(z)
 
     return np.array(latents)
-
-
-def _sort_key(name: str):
-    """Sort HDF5 group names numerically if possible."""
-    try:
-        return int(name)
-    except ValueError:
-        return name

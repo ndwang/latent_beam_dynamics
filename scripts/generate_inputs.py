@@ -45,13 +45,13 @@ def _generate_one(args_tuple):
 
     Takes a single tuple for compatibility with Pool.imap_unordered.
     """
-    idx, output_dir, mode, seq_len, n_particles, seed_seq = args_tuple
+    idx, output_dir, mode, seq_len, n_particles, linear, seed_seq = args_tuple
     rng = np.random.default_rng(seed_seq)
     sample_dir = output_dir / f"{idx:06d}"
     sample_dir.mkdir(parents=True, exist_ok=True)
 
     if mode == 'sectioned':
-        elements, lattice_info = sample_sectioned_lattice(seq_len, rng)
+        elements, lattice_info = sample_sectioned_lattice(seq_len, rng, linear=linear)
         beam_params = sample_matched_beam_params(rng, lattice_info)
         with open(sample_dir / 'lattice_info.json', 'w') as f:
             json.dump(lattice_info, f, indent=2)
@@ -87,6 +87,8 @@ def main():
     parser.add_argument('--n-particles', type=int, default=100_000)
     parser.add_argument('--output-dir', type=str, required=True)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--linear', action='store_true',
+                        help="Linear optics only: no sextupoles or RF cavities")
     parser.add_argument('--workers', type=int, default=None,
                         help="Number of parallel workers (default: all CPUs)")
     args = parser.parse_args()
@@ -104,7 +106,7 @@ def main():
     print(f"Generating {args.n_samples} {args.mode} samples with {n_workers} workers")
 
     tasks = [
-        (i, output_dir, args.mode, args.seq_len, args.n_particles, child_seeds[i])
+        (i, output_dir, args.mode, args.seq_len, args.n_particles, args.linear, child_seeds[i])
         for i in range(args.n_samples)
     ]
 
@@ -121,6 +123,7 @@ def main():
     # Save generation metadata
     metadata = {
         'mode': args.mode,
+        'linear': args.linear,
         'n_samples': args.n_samples,
         'seq_len': args.seq_len,
         'n_particles': args.n_particles,

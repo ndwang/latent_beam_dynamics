@@ -37,7 +37,7 @@ import h5py
 from pmd_beamphysics import ParticleGroup
 from pmd_beamphysics.readers import particle_paths
 
-from src.data.preprocessing import particles_to_frequency_maps
+from beam_vae.data.preprocessing import particles_to_frequency_maps
 
 SPEED_OF_LIGHT = 299792458.0  # m/s
 

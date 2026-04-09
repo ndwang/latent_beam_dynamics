@@ -110,5 +110,5 @@ def generate_run_name(config: Dict[str, Any]) -> str:
     """
     d_model = config.get("model", {}).get("d_model", 0)
     n_layers = config.get("model", {}).get("n_layers", 0)
-    timestamp = datetime.now().strftime("%y%m%d_%H%M")
+    timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
     return f"lbd_d{d_model}_L{n_layers}_{timestamp}"

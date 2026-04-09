@@ -230,7 +230,7 @@ def _build_arc_half_cell(
 
 
 def sample_sectioned_lattice(
-    seq_len: int, rng: np.random.Generator,
+    seq_len: int, rng: np.random.Generator, *, linear: bool = False,
 ) -> tuple[np.ndarray, dict]:
     """Generate a lattice from stitched FODO-based sections.
 
@@ -273,9 +273,9 @@ def sample_sectioned_lattice(
         }
 
         if stype == "straight":
-            sec["p_rf"] = float(rng.uniform(*P_RF_RANGE))
+            sec["p_rf"] = 0.0 if linear else float(rng.uniform(*P_RF_RANGE))
         else:
-            sec["p_sext"] = float(rng.uniform(*P_SEXT_RANGE))
+            sec["p_sext"] = 0.0 if linear else float(rng.uniform(*P_SEXT_RANGE))
             sec["base_angle"] = float(rng.uniform(*ANGLE_RANGE))
 
         sections.append(sec)

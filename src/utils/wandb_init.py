@@ -35,6 +35,7 @@ def init_wandb(
         run = wandb.init(
             project=wandb_cfg.get("project", "latent-beam-dynamics"),
             entity=wandb_cfg.get("entity"),
+            group=wandb_cfg.get("group"),
             name=run_name,
             config=config,
             dir=str(output_dir),

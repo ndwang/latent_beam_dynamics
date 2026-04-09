@@ -64,6 +64,7 @@ class WandbConfig(BaseModel):
     enabled: bool = False
     project: str = "latent-beam-dynamics"
     entity: Optional[str] = None
+    group: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     notes: Optional[str] = None
     offline: bool = True

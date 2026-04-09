@@ -48,7 +48,7 @@ class LatentTrajectoryDataset(Dataset):
         elements : (seq_len, element_dim)
         z_gt     : (seq_len, latent_dim)
         """
-        z0 = self.z_traj[idx, 0]
-        z_gt = self.z_traj[idx, 1:]
-        elements = self.elements[idx]
+        z0 = torch.as_tensor(self.z_traj[idx, 0], dtype=torch.float32).clone()
+        z_gt = torch.as_tensor(self.z_traj[idx, 1:], dtype=torch.float32).clone()
+        elements = torch.as_tensor(self.elements[idx], dtype=torch.float32).clone()
         return z0, elements, z_gt

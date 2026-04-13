@@ -98,8 +98,12 @@ python scripts/evaluate.py runs/<run>/lbd_best.pth --data /path/to/data --output
 # Run model sanity checks
 python scripts/check_models.py
 
-# Submit to SLURM
-sbatch slurm/submit_single.sh
+# Submit a single training run to SLURM — all args passed as Hydra overrides
+sbatch slurm/submit_single.sh model.d_model=512 training.epochs=500 data.path=data/encoded_sectioned_10k
+
+# Submit a 1D hyperparameter scan to SLURM (4 parallel GPU jobs)
+# Args: <param_name> <space-separated values> <fixed overrides> <sweep group>
+sbatch slurm/submit_1d_scan.sh "model.n_layers" "1 2 3 4" "model.d_model=512 data.path=data/encoded_sectioned_10k training.epochs=500" "scan2_nlayers"
 
 # Sync W&B logs from login node
 ./slurm/sync_wandb.sh

@@ -21,10 +21,16 @@
 # ============================================
 
 # --- CONFIGURATION ---
-PARAM_NAME="model.d_model"              # Parameter to scan (dot notation)
-PARAM_VALUES=(128 256 512 1024)         # Values to try
-FIXED_OVERRIDES="data.path=/path/to/data_dir training.epochs=200"
-SWEEP_GROUP="d_model_scan"
+# Usage: sbatch submit_1d_scan.sh <param_name> <space-separated values> <fixed overrides> <sweep group>
+# Example: sbatch submit_1d_scan.sh "model.n_layers" "1 2 3 4" "model.d_model=512 data.path=data/encoded_sectioned_10k training.epochs=500" "scan2_nlayers"
+if [[ $# -ne 4 ]]; then
+    echo "Usage: $0 <param_name> <values> <fixed_overrides> <sweep_group>" >&2
+    exit 1
+fi
+PARAM_NAME="$1"
+IFS=' ' read -ra PARAM_VALUES <<< "$2"
+FIXED_OVERRIDES="$3"
+SWEEP_GROUP="$4"
 
 cd /pscratch/sd/n/ndwang/latent_beam_dynamics
 ml load conda

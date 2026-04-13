@@ -18,7 +18,7 @@ scheduler:
 
 # W&B logging
 wandb:
-  enabled: false
+  enabled: true
   project: "latent-beam-dynamics"
   entity: null
   offline: true

@@ -15,6 +15,7 @@ Latent-space causal transformer for accelerator beam dynamics, trained on NERSC 
 │   ├── analyze_data.py  # Post-tracking data quality diagnostics
 │   ├── scan_alive.py # Quick particle survival check
 │   ├── train.py      # Main training script
+│   ├── evaluate.py   # Post-training checkpoint evaluation + plots
 │   └── check_models.py  # Sanity checks for all model variants
 ├── slurm/            # NERSC job submission scripts
 └── src/              # Source code
@@ -74,6 +75,20 @@ python scripts/train.py data.path=/path/to/data_dir
 
 # Resume from checkpoint
 python scripts/train.py --resume runs/my_run/lbd_best.pth
+
+# Evaluate a checkpoint (runs in lbd env; auto-detects config from run dir)
+python scripts/evaluate.py runs/<run>/lbd_best.pth
+# Override data path or output dir:
+python scripts/evaluate.py runs/<run>/lbd_best.pth --data /path/to/data --output /path/to/out
+# Outputs go to runs/<run>/eval/ by default:
+#   per_step_mse.png    — latent MSE vs element index (AR + teacher-forcing for Tracking)
+#   scales_error.png    — relative scale error (pred−gt)/gt per dimension, selected samples
+#   centroids_error.png — absolute centroid error |pred−gt| per dimension, selected samples
+#   phase_space.png     — x-x'/y-y'/z-δ frequency maps at 8 elements (gt row vs pred row)
+#   latent_pca.png      — predicted vs gt trajectory in top-2 PCA directions
+#   metrics.json        — scalar MSE summary
+# Plots 2–4 require vae_meta.json in the data dir (written by encode_latent.py).
+# --n-samples controls how many val samples appear in per-sample plots (default 4).
 
 # Run model sanity checks
 python scripts/check_models.py

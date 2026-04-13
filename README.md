@@ -150,20 +150,39 @@ z_pred = model(z0, x_raw)  # same call for training and inference
 
 ## Setup
 
-Requires Python >= 3.13 and PyTorch with CUDA 12.4.
+Runs on NERSC Perlmutter. Three conda environments cover different pipeline stages:
+
+| Environment | Stage | Key packages |
+|-------------|-------|-------------|
+| `lbd_datagen` | Lattice generation + Tao tracking | NumPy, distgen, pmd_beamphysics, Bmad/Tao |
+| `vae` | VAE data prep (frequency maps) | beam_vae, PyTorch |
+| `lbd` | Transformer training | PyTorch + CUDA 12.4 |
 
 ```bash
-uv sync
+ml load conda
 
-# TrackingTransformer
-python scripts/train.py model.name=tracking
+# Stage 1: Generate lattice + beam inputs
+conda activate lbd_datagen
+python scripts/generate_inputs.py --mode sectioned --n-samples 10000 --seq-len 32 --output-dir data/sectioned_10k
 
-# LatticeTransformer
-python scripts/train.py model.name=lattice
+# Stage 2: Track particles through Bmad/Tao
+conda activate lbd_datagen
+find data/sectioned_10k -mindepth 1 -maxdepth 1 -type d | sort | \
+    parallel -j$(nproc) bash scripts/track_one.sh {}
+
+# Stage 3: Convert tracked beams to VAE training data
+conda activate vae
+python scripts/prepare_vae_data.py --data-dir data/sectioned_10k \
+    --output data/vae_training/sectioned_10k --workers 128
+
+# Stage 4: Train transformer
+conda activate lbd
+python scripts/train.py model.name=tracking   # or model.name=lattice
 ```
 
 Run the model sanity check:
 
 ```bash
+conda activate lbd
 python scripts/check_models.py
 ```

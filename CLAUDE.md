@@ -76,6 +76,11 @@ python scripts/train.py data.path=/path/to/data_dir
 # Resume from checkpoint
 python scripts/train.py --resume runs/my_run/lbd_best.pth
 
+# Compare runs from a scan — run this first to identify which checkpoints to evaluate
+python scripts/compare_runs.py runs/d_model_scan_*             # summary table (best val_loss, epoch)
+python scripts/compare_runs.py runs/d_model_scan_* --all       # all analyses: convergence, overfitting, trajectory, config-diff
+python scripts/compare_runs.py runs/d_model_scan_* --config-diff  # which params vary across runs
+
 # Evaluate a checkpoint (runs in lbd env; auto-detects config from run dir)
 python scripts/evaluate.py runs/<run>/lbd_best.pth
 # Override data path or output dir:
@@ -106,6 +111,12 @@ sbatch slurm/submit_single.sh
   - `z_traj.npy`: `(N, seq_len+1, latent_dim)` — VAE-encoded beam states
   - `elements.npy`: `(N, seq_len, element_dim)` — raw element parameters `[L, K1, K2, Angle, V_rf, f_rf, phi_rf]`
 
+## Experiment Tracking
+
+`EXPERIMENTS.md` is the running log of all training runs and their conclusions. **Always update it:**
+- **Before** launching a new scan: write a prose section explaining the motivation, what question is being asked, what you expect to see and why, and what the result would imply either way
+- **After** runs complete: record the results and write a detailed analysis — what the numbers mean, whether the outcome matched expectations, what it implies about the model or training dynamics, and what to try next
+
 ## Conventions
 
 - Config overrides use dot notation: `model.d_model=512`
@@ -117,7 +128,16 @@ sbatch slurm/submit_single.sh
 
 ## Environment
 
+Three conda environments for different pipeline stages (all on Perlmutter):
+
 ```bash
 ml load conda
-conda activate lbd
+
+conda activate lbd_datagen   # Stage 1-2: lattice generation + Tao tracking
+conda activate vae            # Stage 3: prepare_vae_data.py (beam_vae preprocessing)
+conda activate lbd            # Stage 4: transformer training (PyTorch + CUDA)
 ```
+
+- **lbd_datagen**: NumPy, distgen, pmd_beamphysics, Bmad/Tao — no PyTorch
+- **vae**: beam_vae package (frequency maps, VAE encode) + PyTorch
+- **lbd**: PyTorch, model training, evaluation

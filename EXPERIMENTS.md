@@ -66,12 +66,12 @@ L=6 baseline taken from scan1_dmodel_long.
 
 ### d_model=512
 
-Runs for L=1–4 all crashed after ~30 seconds (~10–34 epochs). **No usable results.**
+Runs for L=1–4 crashed after ~30 seconds due to interactive session timeout (not a training failure). Resubmitted as SLURM job 51517619 on 2026-04-13. Results pending.
 
-**Conclusions:**
+**Conclusions (d_model=256 only):**
 - Strong gains from L=1 to L=3; diminishing returns from L=3 onward (L3≈L4, L6 still slightly better).
 - L=6 remains the best tested depth.
-- The d_model=512 × n_layers sweep needs to be rerun — unclear whether the same saturation pattern holds at larger width.
+- The d_model=512 × n_layers sweep is pending — unclear whether the same saturation pattern holds at larger width.
 
 ---
 
@@ -109,5 +109,36 @@ val_loss = **0.0263** (`lbd_d512_L6_260406_185838`)
 
 ---
 
+## Evaluation — Best Checkpoint (2026-04-13)
+
+Checkpoint: `lbd_d512_L6_260406_185838_best.pth` (epoch 456, val_loss 0.0263, LatticeTransformer).
+Output: `runs/lbd_d512_L6_260406_185838/eval/`.
+
+### Per-step MSE
+
+Error grows monotonically along the sequence — from ~2×10⁻⁴ at element 0 to ~8×10⁻² at element 31, roughly a 400× increase. Despite LatticeTransformer being a parallel (non-autoregressive) model, the cumsum output structure causes errors in early Δz predictions to propagate forward through the accumulated trajectory.
+
+### Physical-space plots (VAE-decoded)
+
+**Phase space portraits** (sample 317, 63rd percentile): qualitatively excellent. The model correctly captures the rotation of transverse phase ellipses (x-x', y-y') as the beam advances, and gets the round longitudinal distribution (z-δ) right throughout the sequence.
+
+**Scale errors** (relative, pred−gt)/gt:
+- σ_δ (energy spread): best-predicted dimension, errors within ±4% even for hard samples. Energy spread is approximately conserved through the lattice.
+- σ_z (bunch length): worst-predicted dimension, up to 80-100% relative error on hard samples. RF cavities drive large bunch length changes that are the main source of difficulty.
+- Transverse scales (σ_x, σ_x', σ_y, σ_y'): intermediate, ±20-40%.
+
+**Centroid errors** (absolute, |pred−gt|):
+- Transverse centroids (x, y, x', y') and energy centroid (δ) are very well predicted across all samples.
+- Longitudinal centroid (z) for the 90th-percentile sample reaches ~0.6 units — the single largest outlier.
+
+### Key takeaways
+
+The model is qualitatively correct and quantitatively accurate on most phase-space dimensions. The systematic weakness is longitudinal dynamics (σ_z, z centroid), driven by RF elements. This is the clearest direction for future improvement — whether through architecture changes, loss reweighting toward later elements or the longitudinal dimensions, or more diverse training data covering a wider range of RF configurations.
+
+---
+
 ## Open Questions
+
+- **Does depth saturation at d_model=512 follow the same pattern as d_model=256?** Scan 2 rerun pending (SLURM job 51517619, 2026-04-13).
+- **Can longitudinal prediction be improved?** The model's main failure mode is σ_z and z centroid errors driven by RF elements. Possible approaches: loss reweighting by element type or sequence position, explicit RF element conditioning, or longer training sequences.
 

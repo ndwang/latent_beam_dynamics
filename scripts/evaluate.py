@@ -3,9 +3,9 @@
 
 Produces five figures:
   per_step_mse.png    — latent-space MSE vs element index (all val samples)
-  scales_error.png    — relative scale error (pred−gt)/gt per dimension
-  centroids_error.png — absolute centroid error |pred−gt| per dimension
-  phase_space.png     — frequency map comparison at 8 element positions
+  scales_error_s{N}.png    — 2×6: raw gt+pred values (top) and relative error (bottom), median sample N
+  centroids_error_s{N}.png — 2×6: raw gt+pred values (top) and absolute error (bottom), median sample N
+  phase_space_s{N}.png     — frequency map comparison at 8 element positions, median sample N
   latent_pca.png      — predicted vs ground-truth trajectories in PCA space
 
 Plots 2–4 require a vae_meta.json file in the data directory (written by encode_latent.py).
@@ -72,16 +72,22 @@ def load_model(checkpoint_path: Path, device: torch.device):
     if not config_path.exists():
         raise FileNotFoundError(f"config.yaml not found in {run_dir}")
 
-    config = load_config(config_path=config_path)
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
     model_cfg = dict(config["model"])
-    model_name = model_cfg.pop("name")
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if "name" not in model_cfg:
+        # Infer model type from checkpoint keys for pre-name checkpoints
+        ckpt_keys = set(ckpt["model_state_dict"].keys())
+        model_name = "lattice" if any("beam_cond" in k for k in ckpt_keys) else "tracking"
+    else:
+        model_name = model_cfg.pop("name")
     model_cls = _MODELS.get(model_name)
     if model_cls is None:
         raise ValueError(f"Unknown model.name={model_name!r}")
 
     model = model_cls(ModelConfig(**model_cfg))
 
-    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device).eval()
 
@@ -254,53 +260,71 @@ def plot_per_step_mse(data: dict, model_name: str, output_dir: Path):
 
 
 def plot_scales_error(scales_pred: np.ndarray, scales_gt: np.ndarray,
-                      sample_indices: np.ndarray, output_dir: Path):
-    """Relative scale error (pred − gt) / gt."""
+                      sample_idx: int, output_dir: Path):
+    """2 rows × 6 cols: raw gt+pred values (top) and relative error (bottom)."""
     T = scales_pred.shape[1]
     steps = np.arange(T)
-    colors = _sample_colors(len(sample_indices))
 
-    fig, axes = plt.subplots(2, 3, figsize=(14, 7), sharey=False)
-    for dim, (ax, label) in enumerate(zip(axes.flat, SCALE_LABELS)):
-        for i, (idx, c) in enumerate(zip(sample_indices, colors)):
-            gt   = scales_gt[i, :, dim]
-            pred = scales_pred[i, :, dim]
-            rel_err = (pred - gt) / gt * 100
-            ax.plot(steps, rel_err, color=c, alpha=0.85, label=f"sample {idx}")
-        ax.axhline(0, color="k", linewidth=0.7, linestyle="--")
-        ax.set_title(label, fontsize=10)
-        ax.set_xlabel("Element index")
-        ax.set_ylabel("Relative error (%)")
-        ax.grid(True, alpha=0.3)
+    fig, axes = plt.subplots(2, 6, figsize=(22, 6), sharey=False)
+    for dim, label in enumerate(SCALE_LABELS):
+        gt   = scales_gt[0, :, dim]
+        pred = scales_pred[0, :, dim]
+        rel_err = (pred - gt) / gt * 100
 
-    axes.flat[0].legend(fontsize=8)
-    fig.suptitle(r"Scale relative error: $(pred - gt)\,/\,gt$", fontsize=13)
+        ax_top = axes[0, dim]
+        ax_top.plot(steps, gt,   color="steelblue",  label="gt")
+        ax_top.plot(steps, pred, color="tomato", linestyle="--", label="pred")
+        ax_top.set_title(label, fontsize=10)
+        ax_top.grid(True, alpha=0.3)
+        if dim == 0:
+            ax_top.legend(fontsize=8)
+            ax_top.set_ylabel("Value")
+
+        ax_bot = axes[1, dim]
+        ax_bot.plot(steps, rel_err, color="k")
+        ax_bot.axhline(0, color="k", linewidth=0.7, linestyle="--")
+        ax_bot.set_xlabel("Element index")
+        ax_bot.grid(True, alpha=0.3)
+        if dim == 0:
+            ax_bot.set_ylabel("Rel. error (%)")
+
+    fig.suptitle(rf"Scales — sample {sample_idx}", fontsize=13)
     fig.tight_layout()
-    _save(fig, output_dir / "scales_error.png")
+    _save(fig, output_dir / f"scales_error_s{sample_idx}.png")
 
 
 def plot_centroids_error(centroids_pred: np.ndarray, centroids_gt: np.ndarray,
-                         sample_indices: np.ndarray, output_dir: Path):
-    """Absolute centroid error |pred − gt|."""
+                         sample_idx: int, output_dir: Path):
+    """2 rows × 6 cols: raw gt+pred values (top) and absolute error (bottom)."""
     T = centroids_pred.shape[1]
     steps = np.arange(T)
-    colors = _sample_colors(len(sample_indices))
 
-    fig, axes = plt.subplots(2, 3, figsize=(14, 7), sharey=False)
-    for dim, (ax, label) in enumerate(zip(axes.flat, CENTROID_LABELS)):
-        for i, (idx, c) in enumerate(zip(sample_indices, colors)):
-            abs_err = np.abs(centroids_pred[i, :, dim] - centroids_gt[i, :, dim])
-            ax.plot(steps, abs_err, color=c, alpha=0.85, label=f"sample {idx}")
-        ax.axhline(0, color="k", linewidth=0.7, linestyle="--")
-        ax.set_title(label, fontsize=10)
-        ax.set_xlabel("Element index")
-        ax.set_ylabel("Absolute error")
-        ax.grid(True, alpha=0.3)
+    fig, axes = plt.subplots(2, 6, figsize=(22, 6), sharey=False)
+    for dim, label in enumerate(CENTROID_LABELS):
+        gt   = centroids_gt[0, :, dim]
+        pred = centroids_pred[0, :, dim]
+        abs_err = np.abs(pred - gt)
 
-    axes.flat[0].legend(fontsize=8)
-    fig.suptitle(r"Centroid absolute error: $|pred - gt|$", fontsize=13)
+        ax_top = axes[0, dim]
+        ax_top.plot(steps, gt,   color="steelblue",  label="gt")
+        ax_top.plot(steps, pred, color="tomato", linestyle="--", label="pred")
+        ax_top.set_title(label, fontsize=10)
+        ax_top.grid(True, alpha=0.3)
+        if dim == 0:
+            ax_top.legend(fontsize=8)
+            ax_top.set_ylabel("Value")
+
+        ax_bot = axes[1, dim]
+        ax_bot.plot(steps, abs_err, color="k")
+        ax_bot.axhline(0, color="k", linewidth=0.7, linestyle="--")
+        ax_bot.set_xlabel("Element index")
+        ax_bot.grid(True, alpha=0.3)
+        if dim == 0:
+            ax_bot.set_ylabel("Abs. error")
+
+    fig.suptitle(rf"Centroids — sample {sample_idx}", fontsize=13)
     fig.tight_layout()
-    _save(fig, output_dir / "centroids_error.png")
+    _save(fig, output_dir / f"centroids_error_s{sample_idx}.png")
 
 
 def plot_phase_space(maps_pred: np.ndarray, maps_gt: np.ndarray,
@@ -329,16 +353,13 @@ def plot_phase_space(maps_pred: np.ndarray, maps_gt: np.ndarray,
         gt_row   = plane_row * 2
         pred_row = plane_row * 2 + 1
 
-        # Shared color range per plane so gt and pred are directly comparable
-        all_vals = np.concatenate([
-            maps_gt[el_indices, ch].ravel(),
-            maps_pred[el_indices, ch].ravel(),
-        ])
-        vmin, vmax = float(all_vals.min()), float(all_vals.max())
-
         for col, t in enumerate(el_indices):
             ax_gt   = axes[gt_row, col]
             ax_pred = axes[pred_row, col]
+
+            # Color range shared between gt and pred for this element only
+            all_vals = np.concatenate([maps_gt[t, ch].ravel(), maps_pred[t, ch].ravel()])
+            vmin, vmax = float(all_vals.min()), float(all_vals.max())
 
             ax_gt.imshow(maps_gt[t, ch],   origin="lower",
                          vmin=vmin, vmax=vmax, cmap="viridis", aspect="equal")
@@ -357,7 +378,7 @@ def plot_phase_space(maps_pred: np.ndarray, maps_gt: np.ndarray,
 
     fig.suptitle(f"Phase space portraits — sample {sample_idx}", fontsize=12)
     fig.tight_layout()
-    _save(fig, output_dir / "phase_space.png")
+    _save(fig, output_dir / f"phase_space_s{sample_idx}.png")
 
 
 def _pca2(z_all: np.ndarray):
@@ -504,15 +525,18 @@ def main():
     scales_gt,   centroids_gt,   maps_gt   = decode_trajectories(vae, z_gt_sel,   device)
     scales_pred, centroids_pred, maps_pred = decode_trajectories(vae, z_pred_sel, device)
 
+    # Plots 2–4 use the median-error sample
+    mid = len(sel) // 2
+    mid_idx = sel[mid]
+
     # ── Plot 2: scales relative error ──
-    plot_scales_error(scales_pred, scales_gt, sel, output_dir)
+    plot_scales_error(scales_pred[mid:mid+1], scales_gt[mid:mid+1], mid_idx, output_dir)
 
     # ── Plot 3: centroids absolute error ──
-    plot_centroids_error(centroids_pred, centroids_gt, sel, output_dir)
+    plot_centroids_error(centroids_pred[mid:mid+1], centroids_gt[mid:mid+1], mid_idx, output_dir)
 
     # ── Plot 4: phase space (median-error sample) ──
-    mid = len(sel) // 2
-    plot_phase_space(maps_pred[mid], maps_gt[mid], sel[mid], output_dir)
+    plot_phase_space(maps_pred[mid], maps_gt[mid], mid_idx, output_dir)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,8 @@ class ModelSchema(BaseModel):
     dropout: float = Field(default=_MC["dropout"], ge=0.0, le=1.0)
     mlp_ratio: int = Field(default=_MC["mlp_ratio"], ge=1)
     fusion: str = Field(default=_MC["fusion"])
+    # LatticeTransformer only — ignored by TrackingTransformer
+    output_mode: Literal["cumsum", "direct"] = "cumsum"
 
     @field_validator("d_model")
     @classmethod

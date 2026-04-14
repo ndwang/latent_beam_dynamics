@@ -6,12 +6,19 @@ beam state z₀ via Adaptive Layer Norm, predicts per-element Δz, and
 recovers the full trajectory with a cumulative sum.
 """
 
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 
 from .common import ElementEncoder, ModelConfig
 
-LatticeConfig = ModelConfig
+
+@dataclass
+class LatticeConfig(ModelConfig):
+    # "cumsum": z_t = z0 + Σ delta_z_i (original; errors compound along sequence)
+    # "direct": z_t = z0 + disp_t      (independent per-position prediction; no accumulation)
+    output_mode: str = "cumsum"
 
 
 # ---------------------------------------------------------------------------
@@ -97,10 +104,10 @@ class LatticeTransformer(nn.Module):
     the full trajectory with a cumulative sum.
     """
 
-    def __init__(self, config: ModelConfig | None = None):
+    def __init__(self, config: LatticeConfig | None = None):
         super().__init__()
         if config is None:
-            config = ModelConfig()
+            config = LatticeConfig()
         self.config = config
 
         self.element_encoder = ElementEncoder(config)
@@ -159,5 +166,8 @@ class LatticeTransformer(nn.Module):
         # 5. Output head
         delta_z = self.delta_proj(self.out_norm(x))    # (B, N, latent_dim)
 
-        # 6. Cumulative sum to recover trajectory
-        return z0.unsqueeze(1) + torch.cumsum(delta_z, dim=1)
+        # 6. Recover trajectory
+        if self.config.output_mode == "cumsum":
+            return z0.unsqueeze(1) + torch.cumsum(delta_z, dim=1)
+        else:
+            return z0.unsqueeze(1) + delta_z

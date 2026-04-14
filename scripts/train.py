@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from src.models import ModelConfig, TrackingTransformer, LatticeTransformer
+from src.models import ModelConfig, LatticeConfig, TrackingTransformer, LatticeTransformer
 from src.data import LatentTrajectoryDataset
 from src.training import TrackingTrainer, LatticeTrainer
 from src.utils import load_config, save_config, generate_run_name, init_wandb
@@ -122,7 +122,12 @@ def main():
     if model_cls is None:
         raise ValueError(f"Unknown model.name={model_name_key!r}, expected one of {list(_MODELS)}")
 
-    model_config = ModelConfig(**model_cfg_dict)
+    if model_name_key == "lattice":
+        cfg_cls = LatticeConfig
+    else:
+        cfg_cls = ModelConfig
+        model_cfg_dict.pop("output_mode", None)  # lattice-only field
+    model_config = cfg_cls(**model_cfg_dict)
     model = model_cls(model_config)
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model: {model_name_key} — {param_count:,} parameters")

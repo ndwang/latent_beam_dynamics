@@ -19,7 +19,7 @@ import torch.nn as nn
 @dataclass
 class ModelConfig:
     # Beam latent state dimension (from pre-trained VAE)
-    latent_dim: int = 64
+    latent_dim: int = 256
     # Transformer hidden dimension
     d_model: int = 256
     # Number of transformer layers

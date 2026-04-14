@@ -31,7 +31,7 @@ import yaml
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
-from src.models import ModelConfig, TrackingTransformer, LatticeTransformer
+from src.models import ModelConfig, LatticeConfig, TrackingTransformer, LatticeTransformer
 from src.data import LatentTrajectoryDataset
 from src.utils.config import load_config
 
@@ -86,7 +86,8 @@ def load_model(checkpoint_path: Path, device: torch.device):
     if model_cls is None:
         raise ValueError(f"Unknown model.name={model_name!r}")
 
-    model = model_cls(ModelConfig(**model_cfg))
+    cfg_cls = LatticeConfig if model_name == "lattice" else ModelConfig
+    model = model_cls(cfg_cls(**model_cfg))
 
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device).eval()

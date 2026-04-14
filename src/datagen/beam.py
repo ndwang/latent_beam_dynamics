@@ -13,14 +13,14 @@ from distgen import Generator
 BETA_RANGE = (1.0, 30.0)           # m, log-sampled
 ALPHA_RANGE = (-2.0, 2.0)          # dimensionless
 EMIT_N_RANGE = (1e-7, 1e-4)        # m*rad normalized (0.1 um to 100 um), log-sampled
-SIGMA_DELTA_RANGE = (1e-4, 5e-3)   # relative, log-sampled
+SIGMA_DELTA_RANGE = (1e-4, 1e-2)   # relative, log-sampled
 SIGMA_Z_RANGE = (1e-4, 0.1)        # m (0.1 mm to 10 cm), log-sampled
-ENERGY_RANGE = (0.5, 10.0)         # GeV, log-sampled
+ENERGY_RANGE = (0.1, 20.0)         # GeV, log-sampled
 CENTROID_CLIP = 3.0                 # sigma units
 ELECTRON_MASS_EV = 0.510998950e6   # electron rest mass in eV
 
 # Mismatch parameter range for matched beam sampling
-BMAG_RANGE = (1.0, 5.0)            # log-sampled
+BMAG_RANGE = (1.0, 10.0)           # log-sampled
 
 
 def sample_beam_params(rng: np.random.Generator) -> dict:

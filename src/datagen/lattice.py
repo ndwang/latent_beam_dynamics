@@ -30,15 +30,15 @@ L_RF = (0.1, 2.0)          # m
 K1L_RANGE = (0.05, 1.0)    # m^-1 (focal length f = 1/K1L >= 1 m)
 K2L_RANGE = (0.1, 1.5)     # m^-2
 ANGLE_RANGE = (0.01, 0.15) # rad
-VRF_RANGE = (0.1, 5.0)     # MV
+VRF_RANGE = (0.01, 20.0)   # MV
 FRF_RANGE = (0.1, 3.0)     # GHz
-PHIRF_RANGE = (-np.pi / 6, np.pi / 6)  # rad
+PHIRF_RANGE = (-np.pi / 6, np.pi / 6)  # rad (±30°, near stable fixed point)
 
 # --- Sectioned lattice ranges ---
 
-MU_RANGE = (np.radians(20), np.radians(80))  # phase advance per cell
-L_HALF_CELL = (0.75, 2.5)   # half-cell drift-equivalent length (m)
-SIGMA_PERT_RANGE = (0.0, 0.25)  # per-cell perturbation amplitude
+MU_RANGE = (np.radians(10), np.radians(85))  # phase advance per cell
+L_HALF_CELL = (0.5, 5.0)    # half-cell drift-equivalent length (m)
+SIGMA_PERT_RANGE = (0.0, 0.40)  # per-cell perturbation amplitude
 P_RF_RANGE = (0.0, 0.3)     # probability of RF in straight half-cells
 P_SEXT_RANGE = (0.0, 0.3)   # probability of sextupole in arc half-cells
 

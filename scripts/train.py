@@ -62,7 +62,7 @@ def main():
         overrides=args.overrides,
     )
 
-    model_cfg_dict = config.get("model", {})
+    model_cfg_dict = dict(config.get("model", {}))
     training_cfg = config.get("training", {})
     data_cfg = config.get("data", {})
 

@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=4
 #SBATCH --cpus-per-task=16
-#SBATCH --gpus=4
+#SBATCH --gpus-per-node=4
 #SBATCH --constraint=gpu
 #SBATCH --qos=regular
 #SBATCH --account=m5089
@@ -36,7 +36,7 @@ cd /pscratch/sd/n/ndwang/latent_beam_dynamics
 ml load conda
 conda activate lbd
 
-export SRUN_ARGS="--exact --ntasks 1 --gpus 1 --cpus-per-task 16"
+export SRUN_ARGS="--exact --ntasks 1 --gpus-per-task 1 --cpus-per-task 16"
 
 run_single() {
     local val=$1

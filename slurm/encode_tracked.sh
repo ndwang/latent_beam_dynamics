@@ -23,7 +23,7 @@
 
 INPUT_DIR=${1:?Usage: sbatch encode_tracked.sh <input_dir> <output_dir>}
 OUTPUT_DIR=${2:?Missing output_dir}
-VAE_CKPT=${3:-"/pscratch/sd/n/ndwang/vae/runs/baseline_20260127/baseline_20260127_best.pth"}
+VAE_CKPT=${3:-"/pscratch/sd/n/ndwang/vae/runs/beta_1e-5_260401_1523/beta_1e-5_260401_1523_best.pth"}
 
 cd /pscratch/sd/n/ndwang/latent_beam_dynamics
 ml load conda
@@ -32,6 +32,8 @@ conda activate vae
 python scripts/encode_tracked.py \
     --input-dir $INPUT_DIR \
     --vae-checkpoint $VAE_CKPT \
-    --output-dir $OUTPUT_DIR
+    --output-dir $OUTPUT_DIR \
+    --workers $SLURM_CPUS_ON_NODE \
+    --batch-size 512
 
 echo "Done. Output in $OUTPUT_DIR"

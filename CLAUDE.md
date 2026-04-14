@@ -54,11 +54,19 @@ Parallel (non-autoregressive) model. The initial beam state z₀ conditions all 
 ## Quick Commands
 
 ```bash
-# Generate sectioned lattices (recommended)
-python scripts/generate_inputs.py --mode sectioned --n-samples 5000 --seq-len 32 --output-dir data/sectioned
+# Generate + track on a single 128-CPU SLURM node (recommended)
+# Args: <output_dir> [mode] [n_samples] [seq_len] [n_sections] [seed]
+# n_sections=1 (default) uses single-section lattices — avoids cross-section mismatch bias
+sbatch slurm/generate_and_track.sh data/sectioned_1sec_10k
+sbatch slurm/generate_and_track.sh data/sectioned_1sec_10k sectioned 10000 32 1 200
 
-# Track particles through lattices
-find data/sectioned -mindepth 1 -maxdepth 1 -type d | sort | \
+# Chain with encoding via job dependency (submit all at once, run sequentially):
+jid=$(sbatch --parsable slurm/generate_and_track.sh data/sectioned_1sec_10k sectioned 10000 32 1 200)
+sbatch --dependency=afterok:$jid slurm/encode_tracked.sh data/sectioned_1sec_10k data/encoded_sectioned_1sec_10k
+
+# Interactive generation + tracking (lbd_datagen env, for testing):
+python scripts/generate_inputs.py --mode sectioned --n-samples 10000 --seq-len 32 --n-sections 1 --output-dir data/sectioned_1sec_10k --seed 200
+find data/sectioned_1sec_10k -mindepth 1 -maxdepth 1 -type d | sort | \
     parallel -j$(nproc) bash scripts/track_one.sh {}
 
 # Train TrackingTransformer

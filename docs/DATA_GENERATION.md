@@ -382,8 +382,9 @@ with its own optics. Section transitions create non-periodic dynamics.
 
 **Algorithm:**
 
-1. **Sample section layout.** `n_sections` ~ {2, 3}, each independently typed as
-   straight or arc.
+1. **Sample section layout.** `n_sections` ~ {2, 3} by default (pass `--n-sections 1`
+   for single-section lattices, which eliminates cross-section mismatch — see note
+   below). Each section is independently typed as straight or arc.
 
 2. **Sample cell design per section:**
    - Phase advance μ ~ Uniform(20°, 80°)
@@ -427,6 +428,16 @@ Section 2 (arc, μ=60°, 4 half-cells):
 [truncated to 32 elements]
 ```
 
+**Cross-section mismatch.** `sample_matched_beam_params` matches the initial beam
+to Section 1's periodic Twiss (with a B_mag mismatch factor). When the beam enters
+Section 2, it is unmatched to Section 2's periodic solution by an uncontrolled
+amount, producing compounding envelope beating in later sections. With multi-section
+lattices this creates a systematic correlation between element index and dynamics
+complexity — the model sees easy dynamics early and hard dynamics late, always in
+that order. Use `--n-sections 1` to generate single-section lattices where the beam
+is matched to the single section's optics throughout, giving a uniform difficulty
+distribution across sequence positions.
+
 **Initial beam matching.** The periodic Twiss of the first section's cell is
 computed as a reference:
 - `beta_max = L_half · (1 + sin(μ/2)) / sin(μ)` (at QF)
@@ -439,17 +450,17 @@ LogUniform(1, 5) controls mismatch:
 
 **What diversity comes from:**
 
-| Dimension | Range | Effect on dynamics |
-|-----------|-------|-------------------|
-| Phase advance μ | 20°-80° | Focusing strength, beta functions |
-| Cell perturbation σ | 0-25% | Cell-to-cell variation, envelope beating |
-| Section transitions | Different μ, K1 per section | Non-periodic dynamics, optics mismatch |
-| B_mag (beam mismatch) | 1-5 | Envelope oscillation amplitude |
-| Dipoles in arcs | Angle 0.01-0.15 rad | Dispersion, chromatic beam size |
-| Sextupoles near quads | K2L 0.1-1.5 m^-2 | Nonlinear chromaticity correction |
-| RF in straights | 0.1-5 MV, 0.1-3 GHz | Energy change, longitudinal dynamics |
-| Emittance | 0.1 nm - 10 μm·rad | Absolute beam size |
-| Energy spread | 10^-4 - 5×10^-3 | Chromatic effects |
+| Dimension | Range | Effect on dynamics | Single-section? |
+|-----------|-------|-------------------|-----------------|
+| Phase advance μ | 20°-80° | Focusing strength, beta functions | yes |
+| Cell perturbation σ | 0-25% | Cell-to-cell variation, envelope beating | yes |
+| Section transitions | Different μ, K1 per section | Non-periodic dynamics, optics mismatch | no |
+| B_mag (beam mismatch) | 1-5 | Envelope oscillation amplitude | yes |
+| Dipoles in arcs | Angle 0.01-0.15 rad | Dispersion, chromatic beam size | yes |
+| Sextupoles near quads | K2L 0.1-1.5 m^-2 | Nonlinear chromaticity correction | yes |
+| RF in straights | 0.1-5 MV, 0.1-3 GHz | Energy change, longitudinal dynamics | yes |
+| Emittance | 0.1 nm - 10 μm·rad | Absolute beam size | yes |
+| Energy spread | 10^-4 - 5×10^-3 | Chromatic effects | yes |
 
 **Performance (1000 samples, seq_len=32):**
 - Median growth factor: 13.5x (vs 500x for structured, 91x for FODO)
@@ -537,3 +548,44 @@ accuracy for that machine, at the cost of generalization.
 
 Each sample is one lattice + one initial beam. The same lattice can be paired with
 multiple beams (and vice versa) to decouple lattice diversity from beam diversity.
+
+
+---
+
+## 7. SLURM Pipeline (Perlmutter)
+
+The three pipeline stages map to two SLURM scripts:
+
+| Stage | Script | Node | Est. time (10k samples) |
+|-------|--------|------|------------------------|
+| 1–2: Generate + Track | `slurm/generate_and_track.sh` | CPU (128 cores) | ~20 min |
+| 3: Encode | `slurm/encode_tracked.sh` | GPU (1×A100) | ~20 min |
+
+Stages 1 and 2 share the same 128-CPU node: generation runs first using all cores via
+Python multiprocessing (~5 min), then Tao tracking runs immediately after via GNU
+Parallel (~15 min). No queue wait between them.
+
+**Submit a new dataset:**
+
+```bash
+# Submit both jobs at once; encoding waits for generate+track to finish
+jid=$(sbatch --parsable slurm/generate_and_track.sh \
+      data/sectioned_1sec_10k sectioned 10000 32 1 200)
+sbatch --dependency=afterok:$jid slurm/encode_tracked.sh \
+      data/sectioned_1sec_10k data/encoded_sectioned_1sec_10k
+```
+
+**generate_and_track.sh arguments:**
+
+```
+sbatch slurm/generate_and_track.sh <output_dir> [mode] [n_samples] [seq_len] [n_sections] [seed]
+```
+
+| Argument | Default | Notes |
+|----------|---------|-------|
+| output_dir | (required) | Where samples are written |
+| mode | sectioned | Use `sectioned` for all new datasets |
+| n_samples | 10000 | |
+| seq_len | 32 | |
+| n_sections | 1 | 1 = single-section (recommended); `None` for random 2–3 |
+| seed | 42 | Change to avoid overlap with existing datasets |

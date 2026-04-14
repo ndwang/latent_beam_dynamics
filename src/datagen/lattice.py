@@ -231,6 +231,7 @@ def _build_arc_half_cell(
 
 def sample_sectioned_lattice(
     seq_len: int, rng: np.random.Generator, *, linear: bool = False,
+    n_sections: int | None = None,
 ) -> tuple[np.ndarray, dict]:
     """Generate a lattice from stitched FODO-based sections.
 
@@ -244,6 +245,9 @@ def sample_sectioned_lattice(
     Args:
         seq_len: Target number of elements.
         rng: NumPy random generator.
+        linear: If True, no sextupoles or RF cavities.
+        n_sections: Number of sections. If None, sampled randomly from {2, 3}.
+            Set to 1 for single-section lattices with no cross-section mismatch.
 
     Returns:
         elements: (seq_len, 7) element parameter array.
@@ -251,7 +255,8 @@ def sample_sectioned_lattice(
             of the first section (for initial beam matching).
     """
     # --- 1. Sample section layout ---
-    n_sections = rng.integers(2, 4)  # 2 or 3
+    if n_sections is None:
+        n_sections = rng.integers(2, 4)  # 2 or 3
     section_types = rng.choice(["straight", "arc"], size=n_sections)
 
     # --- 2. Sample cell parameters per section ---

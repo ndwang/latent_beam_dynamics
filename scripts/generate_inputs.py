@@ -95,48 +95,62 @@ def main():
                              "Default: random {2, 3}. Use 1 to avoid cross-section mismatch.")
     parser.add_argument('--workers', type=int, default=None,
                         help="Number of parallel workers (default: all CPUs)")
+    parser.add_argument('--start-idx', type=int, default=None,
+                        help="First sample index to generate (inclusive). "
+                             "Used for multi-node runs; seeds are always derived from "
+                             "the full n_samples sequence so output is node-count independent.")
+    parser.add_argument('--end-idx', type=int, default=None,
+                        help="Last sample index to generate (exclusive). "
+                             "Defaults to n_samples.")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Spawn independent, deterministic seeds for each sample
+    # Spawn ALL seeds upfront from the global sequence so that sample i always
+    # gets the same seed regardless of how many nodes or workers are used.
     parent_seq = np.random.SeedSequence(args.seed)
     child_seeds = parent_seq.spawn(args.n_samples)
 
-    n_workers = args.workers or os.cpu_count()
-    n_workers = min(n_workers, args.n_samples)
+    start_idx = args.start_idx if args.start_idx is not None else 0
+    end_idx = args.end_idx if args.end_idx is not None else args.n_samples
+    n_local = end_idx - start_idx
 
-    print(f"Generating {args.n_samples} {args.mode} samples with {n_workers} workers")
+    n_workers = args.workers or os.cpu_count()
+    n_workers = min(n_workers, n_local)
+
+    print(f"Generating samples [{start_idx}, {end_idx}) of {args.n_samples} "
+          f"({args.mode}, {n_workers} workers)")
 
     tasks = [
         (i, output_dir, args.mode, args.seq_len, args.n_particles, args.linear,
          args.n_sections, child_seeds[i])
-        for i in range(args.n_samples)
+        for i in range(start_idx, end_idx)
     ]
 
     with Pool(n_workers) as pool:
         for _ in tqdm(
             pool.imap_unordered(_generate_one, tasks),
-            total=args.n_samples,
+            total=n_local,
             desc=f"Generating {args.mode}",
         ):
             pass
 
-    print(f"Generated {args.n_samples} samples in {output_dir}")
+    print(f"Generated samples [{start_idx}, {end_idx}) in {output_dir}")
 
-    # Save generation metadata
-    metadata = {
-        'mode': args.mode,
-        'linear': args.linear,
-        'n_sections': args.n_sections,
-        'n_samples': args.n_samples,
-        'seq_len': args.seq_len,
-        'n_particles': args.n_particles,
-        'seed': args.seed,
-    }
-    with open(output_dir / 'metadata.json', 'w') as f:
-        json.dump(metadata, f, indent=2)
+    # Only the node covering the start of the dataset writes metadata
+    if start_idx == 0:
+        metadata = {
+            'mode': args.mode,
+            'linear': args.linear,
+            'n_sections': args.n_sections,
+            'n_samples': args.n_samples,
+            'seq_len': args.seq_len,
+            'n_particles': args.n_particles,
+            'seed': args.seed,
+        }
+        with open(output_dir / 'metadata.json', 'w') as f:
+            json.dump(metadata, f, indent=2)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 # Experiment Log
 
-**Fixed across all runs:** `data/encoded_sectioned_10k` · `fusion=concat` · `lr=3e-4` · `batch_size=128` · `latent_dim=256` · `n_heads=8` · `mlp_ratio=4`
+**Defaults unless noted:** `fusion=concat` · `lr=3e-4` · `batch_size=128` · `latent_dim=256` · `n_heads=8` · `mlp_ratio=4` · `dropout=0.1` · `wd=0.01` · `scheduler=cosine` · `500 epochs`
 
 ---
 
@@ -195,6 +195,55 @@ The bias arises from how beam matching works. `sample_matched_beam_params` match
 
 **What the result implies either way:** If flatter MSE and better val loss: the multi-section dataset was the primary problem, and all future datasets should use single-section generation. If MSE still grows: the dataset bias was a secondary effect and the architectural fix (direct output mode, Scan 4) is the critical intervention. Either way, the result cleanly separates data quality from architecture as the source of error accumulation.
 
+**Training:** d128, L6, direct mode, 500 epochs (job 51568069, pending).
+
+Results pending.
+
+---
+
+## Scan 5 — Depth scan at d128, direct mode (2026-04-14)
+
+**Question:** Does increasing depth beyond L=6 improve performance at d_model=128 with direct output mode, and where does it saturate?
+
+**Motivation:** Scan 4 found that d128 with direct mode is the best configuration (val_loss=0.023), but all depth work in scans 2 was done at d256/d512 with cumsum. The depth–width interaction may differ under direct mode: d128 doesn't overfit, so adding layers increases capacity without the generalization penalty seen at d512. The question is whether the model is depth-saturated at L=6 or still has headroom.
+
+**Design:** n_layers scan at {4, 6, 8, 12}, d_model=128, direct mode, 500 epochs. L=6 is a free repeat of the scan 4 d128 result.
+
+| n_layers | best val_loss | train_loss |
+|----------|--------------|------------|
+| 4        | 0.02504      | 0.00463    |
+| 6        | 0.02316      | 0.00301    |
+| 8        | 0.02264      | 0.00253    |
+| 12       | **0.02234**  | 0.00174    |
+
+Runs: `scan_direct_depth_d128_L{4,6,8,12}_260414_1314`.
+
+**Results and analysis:**
+
+Depth helps consistently and without overfitting across the full range tested. Val_loss improves monotonically from L4 (0.025) through L12 (0.022), and the train/val gap remains modest at all depths — L12's train_loss of 0.002 vs val_loss of 0.022 is a 10× gap, in contrast to the 50× gap seen at d512 direct. The model is not capacity-limited at d128 even at L=12.
+
+The returns diminish sharply after L=6. The L4→L6 gain is 0.002 — the only meaningful jump in the scan. Beyond that, L6→L8 is 0.0005 and L8→L12 is 0.0003, both well within noise and not worth the additional parameters. The L=6 result (0.023156) reproduces the scan 4 value exactly, confirming good run-to-run consistency.
+
+L=6 is therefore the right operating point: it captures the only real depth gain in this scan and adding more layers buys nothing. Going deeper is not the path to improvement at this width — the flattening after L=6 suggests d128 is approaching its representational ceiling regardless of depth. Further gains likely require wider models or more data.
+
+---
+
+## Dataset — variety_1sec_100k (2026-04-14)
+
+**Motivation:** All scans to date trained on `encoded_sectioned_10k` (10,000 multi-section samples) or the smaller `encoded_sectioned_1sec_10k` (10,000 single-section samples). Both are likely bottlenecked by dataset size — the latent space has 256 dimensions, the lattice parameter space is high-dimensional, and 10k samples is small. Scan 4 and 5 showed that the model still has room to improve, and the depth scan plateau at d128/L6 suggests the model may be data-limited rather than capacity-limited.
+
+The new dataset addresses two things simultaneously: scale (10× more samples) and diversity (wider parameter ranges). The diversity expansion targets the known weak points. RF voltage is widened from 0.1–5 MV to 0.01–20 MV to cover a broader range of longitudinal dynamics, which is the model's current worst failure mode. Phase advance is extended from 20°–80° to 10°–85° to cover weak-focusing and strongly-focused regimes. Half-cell length is widened from 0.75–2.5 m to 0.5–5.0 m. RF probability per cell is increased from 0–30% to 0–60% so the model trains on more RF-dense lattices. Cell-to-cell perturbation is increased to 0–40%. On the beam side, B_mag is extended from 1–5 to 1–10, energy from 0.5–10 GeV to 0.1–20 GeV, and energy spread from 1e-4–5e-3 to 1e-4–1e-2. The RF phase range is kept at ±30° (appropriate for storage ring RF operating near the stable fixed point). All other conventions are unchanged: single-section, seq_len=32, seed=300.
+
+The generation pipeline was also improved: generation is now distributed across all 4 allocated nodes (512 CPUs total) rather than running on the head node only, cutting generation time from ~66 min to ~17 min for 100k samples. Reproducibility is preserved — seeds are derived from the full `SeedSequence.spawn(n_samples)` on every node, so sample `i` always gets the same seed regardless of node count.
+
+**Dataset:** `encoded_variety_1sec_100k` — 100,000 samples, seq_len=32, n_sections=1, seed=300.
+
+**What we expect:** A significant val_loss reduction relative to training on 10k samples, driven by both scale and diversity. The longitudinal prediction failures (σ_z, z centroid) should improve specifically from the wider RF voltage range and higher RF density. Whether the model generalizes better to unseen lattice configurations will show in the gap between the best 10k val_loss (0.022) and the new result.
+
+**Jobs:** generation 51567584 (running), encoding 51567676 (pending afterok:51567584).
+
+Results pending.
+
 ---
 
 ## Current Best Config (as of 2026-04-14)
@@ -217,9 +266,16 @@ The bias arises from how beam matching works. `sample_matched_beam_params` match
 
 ---
 
+## Pending Experiments
+
+- **Single-section dataset effect.** Does training on `encoded_sectioned_1sec_10k` flatten the per-step MSE curve? Training queued (job 51568069, d128/L6/direct).
+- **Scale and diversity.** `variety_1sec_100k` generation running (51567584), encoding queued (51567676). Training will follow once encoded.
+
+---
+
 ## Open Questions
 
-- **Depth scan at d128 with direct mode.** The d128 direct model is the current best, and it is not obviously saturating on depth — a scan over L=4,6,8,12 could push the val_loss lower without the overfitting risk of larger widths.
+- **Width vs depth with direct mode.** d128 appears to be approaching its representational ceiling at L=12. A scan of d256 with direct mode (and possibly mild regularization to control the overfitting seen in scan 4) may push further.
 - **Regularization for d512 direct.** Direct mode at d512 severely overfits (train_loss=0.0005 vs val_loss=0.025). Stronger regularization (higher dropout, weight decay, or data augmentation) may recover the large-capacity regime.
 - **Can longitudinal prediction be improved?** The model's main failure mode is σ_z and z centroid errors driven by RF elements. Possible approaches: loss reweighting by element type or sequence position, explicit RF element conditioning, or longer training sequences.
-- **Single-section dataset effect.** `encoded_sectioned_1sec_10k` is generated and encoded but not yet used for training. Results pending.
+- **Richer z₀ conditioning.** AdaLN is a relatively weak conditioning mechanism. Prepending z₀ as a learned sequence token would let every element attend directly to the initial beam state via attention, potentially improving the model's ability to track how the beam evolves.

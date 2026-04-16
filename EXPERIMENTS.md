@@ -195,9 +195,25 @@ The bias arises from how beam matching works. `sample_matched_beam_params` match
 
 **What the result implies either way:** If flatter MSE and better val loss: the multi-section dataset was the primary problem, and all future datasets should use single-section generation. If MSE still grows: the dataset bias was a secondary effect and the architectural fix (direct output mode, Scan 4) is the critical intervention. Either way, the result cleanly separates data quality from architecture as the source of error accumulation.
 
-**Training:** d128, L6, direct mode, 500 epochs (job 51568069, pending).
+**Training:** d128, L6, direct mode, 500 epochs (job 51568722). Run: `lbd_d128_L6_260414_201843`.
 
-Results pending.
+**Results and analysis:**
+
+Best val_loss: **0.02195** at epoch 389. Train loss: 0.00199. A 5.4% improvement over the multi-section d128/L6/direct baseline (0.0232), confirming that the cleaner dataset helps marginally.
+
+The per-step MSE curve is still monotonically growing — from ~3×10⁻⁴ at element 0 to ~5×10⁻² at element 31, a ~150× increase. The shape is not flat. This is a decisive result: the data-side hypothesis was wrong, or at least insufficient. Eliminating cross-section transitions reduced the growth ratio from ~400× to ~150× — a real improvement — but the qualitative pattern is unchanged. The model still learns to predict early elements well and fails increasingly at later ones.
+
+This means the primary driver of positional MSE growth is architectural, not a dataset artifact. The LatticeTransformer conditions all predictions via AdaLN on z₀ alone. As the beam evolves through 32 elements, the current beam state diverges from z₀ and that single conditioning signal becomes a progressively worse proxy for where the beam actually is. The model has no mechanism to track this evolution — it must predict the total displacement from z₀ at element 30 using exactly the same conditioning information it used at element 1. The ~150× remaining growth is an irreducible consequence of this design given finite model capacity.
+
+The steep initial rise in the first ~10 elements followed by a slower plateau (roughly log-linear) is consistent with this interpretation: the first few elements produce large Twiss-dependent variations that z₀ mostly captures, but which small errors in the initial prediction compound into a regime the model can't recover from.
+
+**Physical-space failures (sample 967, 63rd percentile):**
+- Transverse scales (σ_x, σ_x', σ_y, σ_y'): tracked with 10–40% relative error, missing fine oscillatory structure.
+- **⟨z⟩ centroid: complete failure.** Ground truth shows large monotonic longitudinal drift driven by RF; prediction is essentially flat at zero. The model has no concept of accumulated RF phase kick.
+- σ_z and σ_δ are reasonably well predicted.
+- Phase space portraits (x-x', y-y', z-δ) are qualitatively correct.
+
+**Conclusion:** The single-section dataset is strictly better than multi-section and should be used going forward — it removes an unnecessary confound and modestly improves val loss. But fixing the data does not fix the MSE growth. The architectural limitation (z₀-only conditioning) is the dominant bottleneck. Meaningful further improvement requires giving the model a way to condition on something closer to the current beam state, not just the initial one. The most direct path is prepending z₀ as a learned attention token so every element can attend to it directly, or exploring a recurrent/autoregressive conditioning mechanism.
 
 ---
 
@@ -240,7 +256,7 @@ The generation pipeline was also improved: generation is now distributed across 
 
 **What we expect:** A significant val_loss reduction relative to training on 10k samples, driven by both scale and diversity. The longitudinal prediction failures (σ_z, z centroid) should improve specifically from the wider RF voltage range and higher RF density. Whether the model generalizes better to unseen lattice configurations will show in the gap between the best 10k val_loss (0.022) and the new result.
 
-**Jobs:** generation 51567584 (running), encoding 51567676 (pending afterok:51567584).
+**Jobs:** Generation completed (51568753). Encoding in progress (51620879, pending afterok:51568753, 4h limit).
 
 Results pending.
 
@@ -268,8 +284,7 @@ Results pending.
 
 ## Pending Experiments
 
-- **Single-section dataset effect.** Does training on `encoded_sectioned_1sec_10k` flatten the per-step MSE curve? Training queued (job 51568069, d128/L6/direct).
-- **Scale and diversity.** `variety_1sec_100k` generation running (51567584), encoding queued (51567676). Training will follow once encoded.
+- **Scale and diversity.** `variety_1sec_100k` generation complete, encoding in progress (51620879). Training will follow once encoded.
 
 ---
 
@@ -278,4 +293,4 @@ Results pending.
 - **Width vs depth with direct mode.** d128 appears to be approaching its representational ceiling at L=12. A scan of d256 with direct mode (and possibly mild regularization to control the overfitting seen in scan 4) may push further.
 - **Regularization for d512 direct.** Direct mode at d512 severely overfits (train_loss=0.0005 vs val_loss=0.025). Stronger regularization (higher dropout, weight decay, or data augmentation) may recover the large-capacity regime.
 - **Can longitudinal prediction be improved?** The model's main failure mode is σ_z and z centroid errors driven by RF elements. Possible approaches: loss reweighting by element type or sequence position, explicit RF element conditioning, or longer training sequences.
-- **Richer z₀ conditioning.** AdaLN is a relatively weak conditioning mechanism. Prepending z₀ as a learned sequence token would let every element attend directly to the initial beam state via attention, potentially improving the model's ability to track how the beam evolves.
+- **Richer z₀ conditioning.** The single-section experiment confirmed that z₀-only AdaLN conditioning is the primary architectural bottleneck — the MSE still grows ~150× even on clean data. Prepending z₀ as a learned sequence token would let every element attend directly to the initial beam state via attention. A more aggressive fix would be a current-state feedback mechanism (e.g. autoregressive conditioning or iterative refinement), but this would sacrifice the parallel inference advantage of the LatticeTransformer.

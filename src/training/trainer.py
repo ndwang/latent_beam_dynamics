@@ -266,6 +266,9 @@ class TrackingTrainer(BaseTrainer):
         return metrics
 
 
+DualStreamTrainer = TrackingTrainer  # same interface: forward(z0, x_raw, z_gt, sampling_prob)
+
+
 class LatticeTrainer(BaseTrainer):
     """Trainer for LatticeTransformer (parallel, no scheduled sampling)."""
 

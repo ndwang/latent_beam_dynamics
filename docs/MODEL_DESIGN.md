@@ -162,6 +162,74 @@ No scheduled sampling needed — the model is fully parallel and sees the same i
 
 ---
 
+## **3c. DualStreamTransformer Architecture**
+
+*Goal: Retain the autoregressive beam-state conditioning of TrackingTransformer while eliminating the direct mixing of the VAE latent space and the element embedding space at the token level.*
+
+### **Motivation**
+
+TrackingTransformer fuses $z_{t-1}$ and $\mathbf{h}_t$ into a single token before the transformer (via add/concat/bilinear). This means the causal self-attention operates over hybrid tokens that conflate two semantically different quantities — beam state (VAE latent space, $\mathbb{R}^{d_{latent}}$) and lattice element features (transformer space, $\mathbb{R}^{d_{model}}$). The two spaces are combined at the input level with a single learned projection, and attention queries/keys mix beam-to-beam and element-to-element similarity through the same dot products.
+
+DualStreamTransformer keeps the two sequences separate throughout: beam tokens and element tokens live in independent streams and interact only through dedicated cross-attention layers, which have their own projection matrices for each direction.
+
+LatticeTransformer, while avoiding exposure bias, conditions all positions on $z_0$ alone via AdaLN. Empirically this produces a per-step MSE that grows monotonically along the sequence (~150× from element 0 to element 31) because $z_0$ becomes an increasingly poor proxy for the current beam state as the sequence progresses. DualStreamTransformer restores access to the evolving beam state ($z_{t-1}$ at each step) without sacrificing the clean space separation.
+
+### **Module C'': Two-Stream Layer**
+
+Each `DualStreamLayer` contains three sub-blocks, all pre-norm with residual connections:
+
+**1. Causal Self-Attention (beam stream)**
+$$\mathbf{b} \leftarrow \mathbf{b} + \text{SelfAttn}(\text{LN}_1(\mathbf{b}),\; M_{causal})$$
+Beam tokens attend to their own history. The causal mask ensures position $t$ only sees positions $0 \dots t$.
+
+**2. Causal Cross-Attention (beam queries element)**
+$$\mathbf{b} \leftarrow \mathbf{b} + \text{CrossAttn}(\underbrace{\text{LN}_2(\mathbf{b})}_{Q},\; \underbrace{\mathbf{h}_{0:t}}_{K,V},\; M_{causal})$$
+Beam tokens attend to element tokens, with the same causal mask applied so that beam state at position $t$ may only attend to elements $0 \dots t$. This is physically correct: the beam at position $t$ has been shaped by elements $0 \dots t$ only. The Q, K, and V projections are separate learned matrices — the two spaces are never merged in the sequence itself.
+
+**3. Feed-Forward Network**
+$$\mathbf{b} \leftarrow \mathbf{b} + \text{FFN}(\text{LN}_3(\mathbf{b}))$$
+
+The element stream $\mathbf{h}$ is **read-only**: element tokens are computed once in parallel by `ElementEncoder` and are never updated. Only the beam stream is written to.
+
+### **Module B': Beam Token Projection**
+
+Beam states are projected from VAE latent space to $d_{model}$:
+$$\mathbf{b}_t = \text{Linear}_{z}(z_{t-1}) \in \mathbb{R}^{d_{model}}$$
+
+No explicit Fourier positional encoding is added to beam tokens. The VAE latent space has been found to encode longitudinal position $s$ as a learned direction — beam tokens already carry implicit positional information. Adding Fourier features on top would redundantly encode position twice and force the model to reconcile two representations of the same quantity. Element tokens retain their Fourier positional encoding via `ElementEncoder` since raw element parameters carry no intrinsic positional information.
+
+### **Module D'': Delta-Dynamics Output Head**
+
+Identical to TrackingTransformer:
+$$\Delta z_t = \text{Linear}_{out}(\text{LN}_{out}(\mathbf{b}_t))$$
+$$\hat{z}_t = z_{t-1} + \Delta z_t$$
+
+The delta-dynamics formulation is retained since most elements cause small perturbations; predicting the correction is easier than predicting the absolute state.
+
+### **Forward Modes and Training Strategy**
+
+Identical interface to TrackingTransformer — three modes sharing the same `forward(z0, x_raw, z_gt, sampling_prob)` entry point:
+
+| Mode | When | Description |
+|---|---|---|
+| Teacher forcing | `z_gt` provided, `sampling_prob=0` | Fully parallel; shifted GT: $[z_0, z_1^{GT}, \dots, z_{N-1}^{GT}]$ |
+| Scheduled sampling | `z_gt` provided, `sampling_prob>0` | Sequential; mix GT and predicted inputs |
+| Autoregressive | `z_gt=None` | Sequential; model feeds its own predictions |
+
+Scheduled sampling ramp (same as TrackingTransformer): pure teacher forcing for `ss_warmup` epochs, then linearly increasing sampling probability at rate `ss_k`. `DualStreamTrainer` is an alias for `TrackingTrainer`.
+
+### **Trade-offs vs. Other Architectures**
+
+| | TrackingTransformer | LatticeTransformer | DualStreamTransformer |
+|---|---|---|---|
+| Beam conditioning | $z_{t-1}$ fused into token | $z_0$ via AdaLN (global) | $z_{t-1}$ via cross-attention (per-step) |
+| Space mixing | At token level (fusion) | AdaLN parameters | Through cross-attention projections only |
+| Inference | Sequential | Single parallel pass | Sequential |
+| Exposure bias | Mitigated (scheduled sampling) | Eliminated | Mitigated (scheduled sampling) |
+| Per-step MSE growth | Unknown | ~150× (empirical) | Unknown — motivating experiment |
+
+---
+
 ## **4. Implementation Details**
 
 ### **Hyperparameters (Suggested Starting Point)**

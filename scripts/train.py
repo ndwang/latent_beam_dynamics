@@ -27,19 +27,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 from torch.utils.data import DataLoader, random_split
 
-from src.models import ModelConfig, LatticeConfig, TrackingTransformer, LatticeTransformer
+from src.models import ModelConfig, LatticeConfig, TrackingTransformer, LatticeTransformer, DualStreamTransformer
 from src.data import LatentTrajectoryDataset
-from src.training import TrackingTrainer, LatticeTrainer
+from src.training import TrackingTrainer, LatticeTrainer, DualStreamTrainer
 from src.utils import load_config, save_config, generate_run_name, init_wandb
 
 _MODELS = {
     "tracking": TrackingTransformer,
     "lattice": LatticeTransformer,
+    "dual_stream": DualStreamTransformer,
 }
 
 _TRAINERS = {
     "tracking": TrackingTrainer,
     "lattice": LatticeTrainer,
+    "dual_stream": DualStreamTrainer,
 }
 
 
@@ -174,7 +176,7 @@ def main():
         grad_clip=training_cfg.get("grad_clip", 1.0),
         logger_callback=logger_callback,
     )
-    if model_name_key == "tracking":
+    if model_name_key in ("tracking", "dual_stream"):
         trainer_kwargs["ss_warmup"] = training_cfg.get("ss_warmup", 10)
         trainer_kwargs["ss_k"] = training_cfg.get("ss_k", 0.05)
 

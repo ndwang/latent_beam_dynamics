@@ -31,11 +31,11 @@ import yaml
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
-from src.models import ModelConfig, LatticeConfig, TrackingTransformer, LatticeTransformer
+from src.models import ModelConfig, LatticeConfig, TrackingTransformer, LatticeTransformer, DualStreamTransformer
 from src.data import LatentTrajectoryDataset
 from src.utils.config import load_config
 
-_MODELS = {"tracking": TrackingTransformer, "lattice": LatticeTransformer}
+_MODELS = {"tracking": TrackingTransformer, "lattice": LatticeTransformer, "dual_stream": DualStreamTransformer}
 
 SCALE_LABELS = [
     r"$\sigma_x$ [m]", r"$\sigma_{x'}$ [rad]",
@@ -86,7 +86,11 @@ def load_model(checkpoint_path: Path, device: torch.device):
     if model_cls is None:
         raise ValueError(f"Unknown model.name={model_name!r}")
 
-    cfg_cls = LatticeConfig if model_name == "lattice" else ModelConfig
+    if model_name == "lattice":
+        cfg_cls = LatticeConfig
+    else:
+        cfg_cls = ModelConfig
+        model_cfg.pop("output_mode", None)  # lattice-only field
     model = model_cls(cfg_cls(**model_cfg))
 
     model.load_state_dict(ckpt["model_state_dict"])
@@ -123,7 +127,7 @@ def build_val_loader(config: dict, data_override, batch_size: int):
 
 @torch.no_grad()
 def run_inference(model, model_name: str, loader: DataLoader, device: torch.device):
-    is_tracking = model_name == "tracking"
+    is_tracking = model_name in ("tracking", "dual_stream")
     z0_list, el_list, z_gt_list, z_ar_list, z_tf_list = [], [], [], [], []
 
     for z0, elements, z_gt in tqdm(loader, desc="Inference"):

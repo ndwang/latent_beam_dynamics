@@ -11,6 +11,7 @@ import torch
 from src.models import (
     TrackingTransformer, TrackingConfig,
     LatticeTransformer, LatticeConfig,
+    DualStreamTransformer, DualStreamConfig,
     trajectory_mse_loss,
 )
 
@@ -86,3 +87,53 @@ with torch.no_grad():
     out2 = model_b(z0, x_raw)
     assert torch.allclose(out1, out2), "Outputs should be deterministic in eval mode"
 print("Determinism check OK")
+
+# ---------------------------------------------------------------------------
+# DualStreamTransformer
+# ---------------------------------------------------------------------------
+
+print(f"\n{'='*60}")
+print("DualStreamTransformer")
+print(f"{'='*60}")
+
+cfg_ds = DualStreamConfig(latent_dim=32, d_model=128, n_layers=4, n_heads=8)
+model_ds = DualStreamTransformer(cfg_ds)
+
+param_count_ds = sum(p.numel() for p in model_ds.parameters())
+print(f"Config:     {cfg_ds}")
+print(f"Parameters: {param_count_ds:,}")
+
+z0     = torch.randn(B, cfg_ds.latent_dim)
+x_raw  = torch.randn(B, N, cfg_ds.element_dim).abs()
+z_gt   = torch.randn(B, N, cfg_ds.latent_dim)
+
+# Teacher forcing (parallel)
+z_pred_tf = model_ds(z0, x_raw, z_gt=z_gt, sampling_prob=0.0)
+loss_tf = trajectory_mse_loss(z_pred_tf, z_gt)
+print(f"Teacher forcing  — output shape: {z_pred_tf.shape}, loss: {loss_tf.item():.4f}")
+
+# Scheduled sampling
+z_pred_ss = model_ds(z0, x_raw, z_gt=z_gt, sampling_prob=0.3)
+loss_ss = trajectory_mse_loss(z_pred_ss, z_gt)
+print(f"Scheduled samp.  — output shape: {z_pred_ss.shape}, loss: {loss_ss.item():.4f}")
+
+# Autoregressive inference
+with torch.no_grad():
+    z_pred_ar = model_ds(z0, x_raw)
+print(f"Autoregressive   — output shape: {z_pred_ar.shape}")
+
+# Backward pass
+loss_tf.backward()
+print("Backward pass OK")
+
+# Teacher forcing and autoregressive should agree at step 0
+# (both condition only on z0, no past predictions yet)
+with torch.no_grad():
+    z_tf2 = model_ds(z0, x_raw, z_gt=z_gt, sampling_prob=0.0)
+    z_ar2 = model_ds(z0, x_raw)
+    assert torch.allclose(z_tf2[:, 0], z_ar2[:, 0], atol=1e-5), \
+        "First prediction should match between teacher forcing and autoregressive"
+print("TF/AR consistency at step 0 OK")
+
+print(f"\n{'='*60}")
+print("All checks passed.")

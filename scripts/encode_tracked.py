@@ -17,7 +17,10 @@ Usage:
 """
 
 import argparse
+import json
 import os
+import yaml
+from datetime import datetime
 import numpy as np
 import torch
 from pathlib import Path
@@ -173,6 +176,9 @@ def main():
                         help="Snapshots per GPU forward pass (default: 512)")
     parser.add_argument('--bins', type=int, default=64)
     parser.add_argument('--n-sigma', type=int, default=4)
+    parser.add_argument('--flush-samples', type=int, default=5000,
+                        help="Flush accumulated maps to GPU after this many samples "
+                             "to bound RAM usage (default: 5000)")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -181,7 +187,8 @@ def main():
 
     n_workers = args.workers or os.cpu_count()
 
-    print(f"Device: {args.device}  |  CPU workers: {n_workers}  |  GPU batch size: {args.batch_size}")
+    print(f"Device: {args.device}  |  CPU workers: {n_workers}  |  "
+          f"GPU batch size: {args.batch_size}  |  flush every: {args.flush_samples} samples")
 
     # Load VAE on GPU
     print(f"Loading VAE from {args.vae_checkpoint}")
@@ -198,64 +205,102 @@ def main():
         print("No tracked samples found. Run Bmad tracking first.")
         return
 
-    # --- Stage A: parallel CPU histogram computation ---
-    print("Stage A: computing frequency maps (parallel CPU)...")
     tasks = [
         (str(d), args.tracked_filename, args.bins, args.n_sigma)
         for d in sample_dirs
     ]
 
-    results = []
+    all_latents_list  = []
+    all_elements_list = []
+    total_skipped = 0
+    seq_len = None
+
+    # Accumulation buffers — flushed to GPU every `flush_samples` valid samples.
+    # This pipelines CPU histogram work with GPU encoding and caps RAM to
+    # O(flush_samples) frequency maps rather than O(n_total).
+    maps_buf, scales_buf, centroids_buf, elements_buf = [], [], [], []
+
+    def flush():
+        if not maps_buf:
+            return
+        latents = _encode_maps_batched(
+            maps_buf, scales_buf, centroids_buf, vae, args.device, args.batch_size,
+        )
+        all_latents_list.extend(latents)
+        all_elements_list.extend(elements_buf)
+        maps_buf.clear(); scales_buf.clear()
+        centroids_buf.clear(); elements_buf.clear()
+
+    print("Processing (CPU histograms → GPU encode, pipelined)...")
     with Pool(n_workers) as pool:
         for result in tqdm(
             pool.imap(_process_sample, tasks),
             total=len(tasks),
-            desc="Histograms",
+            desc="Samples",
         ):
-            results.append(result)
+            if result is None:
+                total_skipped += 1
+                continue
 
-    # Filter failures
-    valid = [(r, d) for r, d in zip(results, sample_dirs) if r is not None]
-    skipped = len(sample_dirs) - len(valid)
-    print(f"  {len(valid)} succeeded, {skipped} skipped")
+            maps, scales, centroids, elements = result
 
-    if not valid:
-        print("No samples successfully processed.")
-        return
+            if seq_len is None:
+                seq_len = elements.shape[0]
+            if maps.shape[0] != seq_len + 1:
+                total_skipped += 1
+                continue
 
-    maps_list      = [r[0] for r, _ in valid]
-    scales_list    = [r[1] for r, _ in valid]
-    centroids_list = [r[2] for r, _ in valid]
-    elements_list  = [r[3] for r, _ in valid]
+            maps_buf.append(maps)
+            scales_buf.append(scales)
+            centroids_buf.append(centroids)
+            elements_buf.append(elements)
 
-    # Verify consistent seq_len
-    seq_len = elements_list[0].shape[0]
-    expected_snapshots = seq_len + 1
-    bad = [i for i, m in enumerate(maps_list) if m.shape[0] != expected_snapshots]
-    if bad:
-        print(f"  Dropping {len(bad)} samples with wrong snapshot count")
-        keep = [i for i in range(len(valid)) if i not in set(bad)]
-        maps_list      = [maps_list[i] for i in keep]
-        scales_list    = [scales_list[i] for i in keep]
-        centroids_list = [centroids_list[i] for i in keep]
-        elements_list  = [elements_list[i] for i in keep]
+            if len(maps_buf) >= args.flush_samples:
+                flush()
 
-    # --- Stage B: batched GPU VAE encoding ---
-    print(f"Stage B: VAE encoding on {args.device} (batch_size={args.batch_size})...")
-    latents_list = _encode_maps_batched(
-        maps_list, scales_list, centroids_list, vae, args.device, args.batch_size,
-    )
+    flush()  # encode any remaining samples
 
     # --- Save ---
-    z_traj_all   = np.array(latents_list, dtype=np.float32)   # (N, T, latent_dim)
-    elements_all = np.array(elements_list, dtype=np.float32)  # (N, seq_len, 7)
+    z_traj_all   = np.array(all_latents_list, dtype=np.float32)   # (N, T, latent_dim)
+    elements_all = np.array(all_elements_list, dtype=np.float32)  # (N, seq_len, 7)
 
     np.save(output_dir / 'z_traj.npy', z_traj_all)
     np.save(output_dir / 'elements.npy', elements_all)
 
-    print(f"Saved {len(latents_list)} samples (skipped {skipped})")
+    n_saved = len(all_latents_list)
+    print(f"\nSaved {n_saved} samples (skipped {total_skipped})")
     print(f"  z_traj.npy:  {z_traj_all.shape}")
     print(f"  elements.npy: {elements_all.shape}")
+
+    # Save provenance metadata so evaluate.py can load the VAE for physical-space plots
+    vae_ckpt_path = Path(args.vae_checkpoint)
+    vae_run_dir = vae_ckpt_path.parent
+    vae_config_path = vae_run_dir / "config.yaml"
+    vae_config = yaml.safe_load(vae_config_path.read_text()) if vae_config_path.exists() else None
+    meta = {
+        "vae_checkpoint": str(vae_ckpt_path),
+        "vae_run_dir": str(vae_run_dir),
+        "vae_config": vae_config,
+        "source_data_dir": str(input_dir),
+        "encoding": {
+            "method": "mu",
+            "note": "Deterministic encoding using encoder mean (no sampling)",
+        },
+        "dataset": {
+            "n_samples": int(z_traj_all.shape[0]),
+            "snapshots_per_sample": int(z_traj_all.shape[1]),
+            "seq_len": int(z_traj_all.shape[1]) - 1,
+            "latent_dim": int(z_traj_all.shape[2]),
+            "element_dim": int(elements_all.shape[2]),
+            "z_traj_shape": list(z_traj_all.shape),
+            "elements_shape": list(elements_all.shape),
+        },
+        "created": datetime.now().isoformat(),
+    }
+    meta_path = output_dir / "vae_meta.json"
+    with open(meta_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    print(f"  vae_meta.json: {meta_path}")
 
 
 if __name__ == '__main__':

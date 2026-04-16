@@ -8,7 +8,7 @@ Produces five figures:
   phase_space_s{N}.png     — frequency map comparison at 8 element positions, median sample N
   latent_pca.png      — predicted vs ground-truth trajectories in PCA space
 
-Plots 2–4 require a vae_meta.json file in the data directory (written by encode_latent.py).
+Plots 2–4 require a vae_meta.json file in the data directory (written by encode_tracked.py).
 
 Usage:
     python scripts/evaluate.py runs/<run>/lbd_best.pth

@@ -100,7 +100,7 @@ python scripts/evaluate.py runs/<run>/lbd_best.pth --data /path/to/data --output
 #   phase_space.png     — x-x'/y-y'/z-δ frequency maps at 8 elements (gt row vs pred row)
 #   latent_pca.png      — predicted vs gt trajectory in top-2 PCA directions
 #   metrics.json        — scalar MSE summary
-# Plots 2–4 require vae_meta.json in the data dir (written by encode_latent.py).
+# Plots 2–4 require vae_meta.json in the data dir (written by encode_tracked.py).
 # --n-samples controls how many val samples appear in per-sample plots (default 4).
 
 # Run model sanity checks

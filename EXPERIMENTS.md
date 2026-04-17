@@ -1,6 +1,8 @@
 # Experiment Log
 
-**Defaults unless noted:** `fusion=concat` · `lr=3e-4` · `batch_size=128` · `latent_dim=256` · `n_heads=8` · `mlp_ratio=4` · `dropout=0.1` · `wd=0.01` · `scheduler=cosine` · `500 epochs`
+**Defaults unless noted:** `fusion=concat` · `lr=3e-4` · `latent_dim=256` · `n_heads=8` · `mlp_ratio=4` · `dropout=0.1` · `wd=0.01` · `scheduler=cosine` · `500 epochs`
+
+**Note on batch_size:** Scan 1 used `batch_size=128`; Scans 2–5 used `batch_size=32` (yaml default, no override). The header originally claimed 128 for all runs — this was wrong. Check `config.yaml` in each run directory for the true value.
 
 ---
 
@@ -256,9 +258,9 @@ The generation pipeline was also improved: generation is now distributed across 
 
 **What we expect:** A significant val_loss reduction relative to training on 10k samples, driven by both scale and diversity. The longitudinal prediction failures (σ_z, z centroid) should improve specifically from the wider RF voltage range and higher RF density. Whether the model generalizes better to unseen lattice configurations will show in the gap between the best 10k val_loss (0.022) and the new result.
 
-**Jobs:** Generation completed (51568753). Encoding in progress (51620879, pending afterok:51568753, 4h limit).
+**Jobs:** Generation completed (51568753). Encoding job (51620879) was cancelled — dataset deleted before encoding completed.
 
-Results pending.
+**Outcome:** Dataset deleted due to storage quota. The raw tracking output is ~200 MB per sample (33 beam snapshots × 100k particles × 6D × float64), so 100k samples accumulates ~20 TB before encoding. This exceeds the available scratch quota. The generate-then-encode pipeline does not scale beyond ~10k samples without a redesigned approach that encodes and discards raw particle data incrementally rather than accumulating the full dataset first.
 
 ---
 
@@ -276,21 +278,42 @@ Results pending.
 | lr              | 3e-4                                     |
 | scheduler       | cosine                                   |
 | epochs          | 500                                      |
-| batch_size      | 128                                      |
+| batch_size      | 32                                       |
 
 **val_loss = 0.0232** · run `scan_direct_dmodel_d128_260414_1213`
 
 ---
 
+## Architecture Comparison — TrackingTransformer and DualStreamTransformer (2026-04-16)
+
+**Question:** Do TrackingTransformer or DualStreamTransformer outperform LatticeTransformer? The LatticeTransformer conditions all predictions via AdaLN on z₀ alone, which was identified as the dominant architectural bottleneck (per-step MSE grows ~150× across the sequence even with direct output mode and single-section data). TrackingTransformer feeds z_{t-1} as input at each step, giving the model a continuously updated view of the beam state. DualStreamTransformer keeps element and beam tokens in separate streams connected by cross-attention, which is a structural middle ground. Either architecture could in principle fix the z₀-only conditioning limitation.
+
+**Methodology:** Comparing architectures under a fixed config (e.g., same bs and lr as prior Lattice runs) is problematic for two reasons. First, bs and lr interact: changing bs without rescaling lr changes the effective optimization trajectory. Second, lr may depend on architecture (different forward pass structures have different gradient magnitudes) and bs depends on model memory footprint. A fair comparison requires each architecture to be evaluated at its own optimal (bs, lr). The additional tuning cost is two 4-GPU jobs per architecture (one bs benchmark, one lr scan) before the main d_model scan.
+
+**Batch size selection:** bs is primarily a hardware/throughput decision — the largest bs that saturates the GPU without OOM. Measured via debug-QOS speed runs (100 steps each): find the bs where samples/sec plateaus. This is architectural (memory footprint) but not strongly dependent on d_model within a reasonable range, so we tune once at d128 and verify d512 doesn't OOM.
+
+**Learning rate selection:** Given the chosen bs, run a 4-job lr scan over {1e-4, 3e-4, 1e-3, 3e-3} at ~150 epochs. The linear scaling rule (lr ∝ bs) gives a starting point when bs differs from the Lattice baseline (bs=32, lr=3e-4), but the rule is approximate and architecture-dependent, so we scan rather than trust the formula. Note: lr may also depend on d_model (gradient magnitudes change with width). The principled fix is μP, which makes hyperparameters transfer exactly across scales. We are not implementing μP for now; instead we tune at d128 (our expected sweet spot) and apply those values across the d_model scan, accepting that results at extreme widths may be slightly suboptimal.
+
+**TrackingTransformer — scheduled sampling cost:** The default training config ramps sampling_prob to 1.0 by epoch 30, after which every training step runs 32 sequential transformer calls instead of 1 parallel pass (~12–15× slower per batch). This needs to be benchmarked (debug job 51673422: ss_warmup=0, ss_k=9999, max_steps=50, 3 epochs) before deciding whether to train with scheduled sampling or teacher-forcing only for the comparison. Validation always uses teacher forcing regardless.
+
+**Steps:**
+1. [done] Speed benchmarks submitted — AR mode (51673422), bs=64/128/256 (51673586–88), DualStream fix (51672840)
+2. [pending] Read speed results → select bs for each architecture
+3. [pending] lr scan at chosen bs, 150 epochs, 4 jobs per architecture
+4. [pending] d_model scan at tuned (bs, lr), 500 epochs, 4 jobs per architecture (mirrors Scan 4 for LatticeTransformer)
+5. [pending] Compare val_loss curves and per-step MSE plots across all three architectures at each d_model
+
+---
+
 ## Pending Experiments
 
-- **Scale and diversity.** `variety_1sec_100k` generation complete, encoding in progress (51620879). Training will follow once encoded.
+- **Architecture comparison tuning** (2026-04-16): Speed benchmarks running (jobs 51673422, 51673586–88, 51672840). Once results are in, select bs, then submit lr scan for TrackingTransformer and DualStreamTransformer.
 
 ---
 
 ## Open Questions
 
-- **Width vs depth with direct mode.** d128 appears to be approaching its representational ceiling at L=12. A scan of d256 with direct mode (and possibly mild regularization to control the overfitting seen in scan 4) may push further.
-- **Regularization for d512 direct.** Direct mode at d512 severely overfits (train_loss=0.0005 vs val_loss=0.025). Stronger regularization (higher dropout, weight decay, or data augmentation) may recover the large-capacity regime.
-- **Can longitudinal prediction be improved?** The model's main failure mode is σ_z and z centroid errors driven by RF elements. Possible approaches: loss reweighting by element type or sequence position, explicit RF element conditioning, or longer training sequences.
-- **Richer z₀ conditioning.** The single-section experiment confirmed that z₀-only AdaLN conditioning is the primary architectural bottleneck — the MSE still grows ~150× even on clean data. Prepending z₀ as a learned sequence token would let every element attend directly to the initial beam state via attention. A more aggressive fix would be a current-state feedback mechanism (e.g. autoregressive conditioning or iterative refinement), but this would sacrifice the parallel inference advantage of the LatticeTransformer.
+- **How to scale the dataset beyond 10k samples.** Raw tracking output is ~200 MB/sample (33 snapshots × 100k particles × 6D × float64), making 100k samples ~20 TB — exceeding scratch quota. Requires a redesigned pipeline that encodes and deletes raw particle data incrementally rather than accumulating the full dataset before encoding.
+- **μP for hyperparameter transfer across d_model.** Without μP, lr tuned at d128 may be suboptimal at d256/d512. Implementing μP would make the d_model scan directly interpretable and eliminate this confound.
+- **Scheduled sampling vs teacher forcing for TrackingTransformer.** The default scheduled sampling schedule makes training ~12–15× slower after epoch 30. Whether the AR training signal improves val_loss (measured in teacher-forcing mode) enough to justify the cost is unknown.
+

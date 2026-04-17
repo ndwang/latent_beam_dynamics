@@ -129,7 +129,7 @@ sbatch slurm/submit_single.sh "tracking_d512" "scan_dmodel" "model.d_model=512 t
 sbatch slurm/submit_1d_scan.sh "model.n_layers" "1 2 3 4" "model.d_model=512 data.path=data/encoded_sectioned_10k training.epochs=500" "scan2_nlayers"
 
 # Sync W&B logs from login node
-./slurm/sync_wandb.sh
+bash scripts/sync_wandb.sh
 ```
 
 ## Data

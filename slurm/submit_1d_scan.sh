@@ -56,8 +56,4 @@ export PARAM_NAME FIXED_OVERRIDES SRUN_ARGS SWEEP_GROUP
 
 parallel -j 4 --delay 0.2 run_single ::: "${PARAM_VALUES[@]}"
 
-echo "Syncing W&B logs..."
-for dir in runs/*/wandb/offline-run-*; do
-    [ -d "$dir" ] && wandb sync "$dir"
-done
-echo "W&B sync complete."
+bash scripts/sync_wandb.sh runs

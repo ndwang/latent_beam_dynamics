@@ -16,8 +16,13 @@ echo "Found $COUNT offline run(s) to sync"
 echo ""
 
 SYNCED=0
+SKIPPED=0
 FAILED=0
 for dir in $OFFLINE_DIRS; do
+    if compgen -G "$dir/*.wandb.synced" > /dev/null 2>&1; then
+        SKIPPED=$((SKIPPED + 1))
+        continue
+    fi
     echo "  Syncing: $dir"
     if wandb sync "$dir" 2>&1 | grep -qiE "(success|synced|done)"; then
         SYNCED=$((SYNCED + 1))
@@ -28,4 +33,4 @@ for dir in $OFFLINE_DIRS; do
 done
 
 echo ""
-echo "Done: $SYNCED synced, $FAILED failed"
+echo "Done: $SYNCED synced, $SKIPPED skipped, $FAILED failed"

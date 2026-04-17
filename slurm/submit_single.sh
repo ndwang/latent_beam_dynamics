@@ -37,8 +37,4 @@ RUN_NAME="${RUN_PREFIX}_$(date +%y%m%d_%H%M)"
 
 python scripts/train.py $OVERRIDES run_name=${RUN_NAME} training.wandb.enabled=true training.wandb.group=${SWEEP_GROUP}
 
-echo "Syncing W&B logs..."
-for dir in runs/*/wandb/offline-run-*; do
-    [ -d "$dir" ] && wandb sync "$dir"
-done
-echo "W&B sync complete."
+bash scripts/sync_wandb.sh runs

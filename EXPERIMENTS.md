@@ -292,22 +292,67 @@ The generation pipeline was also improved: generation is now distributed across 
 
 **Batch size selection:** bs is primarily a hardware/throughput decision — the largest bs that saturates the GPU without OOM. Measured via debug-QOS speed runs (100 steps each): find the bs where samples/sec plateaus. This is architectural (memory footprint) but not strongly dependent on d_model within a reasonable range, so we tune once at d128 and verify d512 doesn't OOM.
 
-**Learning rate selection:** Given the chosen bs, run a 4-job lr scan over {1e-4, 3e-4, 1e-3, 3e-3} at ~150 epochs. The linear scaling rule (lr ∝ bs) gives a starting point when bs differs from the Lattice baseline (bs=32, lr=3e-4), but the rule is approximate and architecture-dependent, so we scan rather than trust the formula. Note: lr may also depend on d_model (gradient magnitudes change with width). The principled fix is μP, which makes hyperparameters transfer exactly across scales. We are not implementing μP for now; instead we tune at d128 (our expected sweet spot) and apply those values across the d_model scan, accepting that results at extreme widths may be slightly suboptimal.
+**Learning rate selection:** Given the chosen bs, run a lr scan over {1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2} at 200 epochs with ReduceOnPlateau scheduler. The linear scaling rule (lr ∝ bs) gives a starting point when bs differs from the Lattice baseline (bs=32, lr=3e-4), but the rule is approximate and architecture-dependent, so we scan rather than trust the formula. Note: lr may also depend on d_model (gradient magnitudes change with width). The principled fix is μP, which makes hyperparameters transfer exactly across scales. We are not implementing μP for now; instead we tune at d128 (our expected sweet spot) and apply those values across the d_model scan, accepting that results at extreme widths may be slightly suboptimal.
 
-**TrackingTransformer — scheduled sampling cost:** The default training config ramps sampling_prob to 1.0 by epoch 30, after which every training step runs 32 sequential transformer calls instead of 1 parallel pass (~12–15× slower per batch). This needs to be benchmarked (debug job 51673422: ss_warmup=0, ss_k=9999, max_steps=50, 3 epochs) before deciding whether to train with scheduled sampling or teacher-forcing only for the comparison. Validation always uses teacher forcing regardless.
+**Why ROP for the lr scan (not cosine):** Using cosine with T_max=150 for a quick scan and then cosine with T_max=500 for the full run creates a systematic bias. With T_max=150, the lr decays to ~0 by the end of the scan, fully consuming the schedule in 150 steps. With T_max=500, the same lr would still be at ~80% of its peak at epoch 150. This means the short cosine scan penalizes higher learning rates — they get fewer effective high-lr steps relative to the full-run schedule. ReduceOnPlateau has no T_max and responds to actual validation progress, so the results transfer cleanly to cosine runs of any length.
+
+**TrackingTransformer — scheduled sampling cost:** The AR benchmark (job 51673422) confirmed two things. First, a bug in `TrackingTransformer._forward_sequential` caused an autograd crash when running the AR backward pass: in-place buffer writes (`z_prev_buf[:, t] = z_cur`, `z_pred_buf[:, t] = z_predicted`) invalidated the computation graph for earlier steps. Fixed by switching to a list + `torch.stack` approach, matching the correct implementation already used by DualStreamTransformer. Second, the DualStream AR benchmark (job 51672840, run during the Pydantic fix wait) confirmed AR training is ~26× slower than teacher forcing (1.76 it/s vs ~45 it/s at bs=32). At 282 batches/epoch, a fully AR 500-epoch training would take ~22 hours — impractical for a 4-hour job. **Decision: use teacher-forcing only (`ss_warmup=500`) for all architecture comparison runs.** This keeps training fast and keeps the comparison fair. Whether scheduled sampling actually improves AR generalization is left as an open question.
+
+**Batch size selection results:** Benchmarks at bs=64/128/256 (jobs 51673586–88) with TrackingTransformer in teacher-forcing mode:
+
+| bs  | Peak it/s | Samples/s |
+|-----|-----------|-----------|
+| 64  | ~46       | ~2950     |
+| 128 | ~30       | ~3840     |
+| 256 | ~15       | ~3840     |
+
+Throughput plateaus at bs=128; going to 256 gives no additional benefit. **Selected bs=128** for both TrackingTransformer and DualStreamTransformer.
+
+**LR scan 1 (flawed, cosine, discarded):** Jobs 51676485/51676487, d_model=128, bs=128, 150 epochs, cosine. Trend monotonically improving 1e-4→3e-3 for both architectures (Tracking: 0.01175→0.00310; DualStream: 0.01172→0.00328). All runs fully converged by epoch 150. However, cosine T_max=150 compresses the schedule relative to the 500-epoch full runs, biasing the comparison against higher lrs. Discarded in favor of ROP scan.
+
+**LR scan 2 (corrected, ROP):** Jobs 51680135/51680137, d_model=128, bs=128, 200 epochs, ReduceOnPlateau (factor=0.5, patience=10). Range {1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2}. Both fully converged by epoch 200. Results:
+
+**TrackingTransformer (TF val_loss — teacher-forcing):**
+
+| lr   | val_loss | train_loss |
+|------|----------|------------|
+| 1e-4 | 0.00893  | 0.00901    |
+| 3e-4 | 0.00602  | 0.00563    |
+| 1e-3 | 0.00365  | 0.00284    |
+| 3e-3 | 0.00300  | 0.00175    |
+| **1e-2** | **0.00271**  | 0.00148    |
+| 3e-2 | 0.00342  | 0.00277    |
+
+**DualStreamTransformer (TF val_loss — teacher-forcing):**
+
+| lr   | val_loss | train_loss |
+|------|----------|------------|
+| 1e-4 | 0.00760  | 0.00727    |
+| 3e-4 | 0.00534  | 0.00425    |
+| 1e-3 | 0.00343  | 0.00192    |
+| **3e-3** | **0.00320**  | 0.00149    |
+| 1e-2 | 0.00430  | 0.00341    |
+| 3e-2 | 0.04095  | 0.03941    |
+
+**Selected lrs: Tracking → 1e-2, DualStream → 3e-3.**
+
+The two architectures have different optimal lrs, which is expected given their different forward-pass structures. For Tracking, improvement is monotone through 1e-2 with a sweet spot there (3e-2 degrades slightly, suggesting instability at very high lr). For DualStream, the curve peaks at 3e-3 and degrades sharply at 1e-2 and collapses entirely at 3e-2. The cross-attention mechanism likely produces smaller gradient scales at the beam–element interface, making DualStream more sensitive to high lrs.
+
+**Critical methodological note:** The val_loss values above are teacher-forcing losses — the model predicts z_t given the true z_{t-1} at each step. This is fundamentally a different metric than the LatticeTransformer's val_loss, which is always computed open-loop (predicting the full trajectory from z₀ with no intermediate ground truth). The ~0.0027–0.0032 figures are not directly comparable to the Lattice baseline of 0.023. They measure one-step prediction accuracy rather than cumulative trajectory accuracy. The true comparison requires evaluating all architectures in autoregressive inference mode and comparing per-step MSE curves, which is the purpose of the upcoming d_model scan + evaluation.
 
 **Steps:**
-1. [done] Speed benchmarks submitted — AR mode (51673422), bs=64/128/256 (51673586–88), DualStream fix (51672840)
-2. [pending] Read speed results → select bs for each architecture
-3. [pending] lr scan at chosen bs, 150 epochs, 4 jobs per architecture
-4. [pending] d_model scan at tuned (bs, lr), 500 epochs, 4 jobs per architecture (mirrors Scan 4 for LatticeTransformer)
-5. [pending] Compare val_loss curves and per-step MSE plots across all three architectures at each d_model
+1. [done] Speed benchmarks — AR mode (51673422), bs=64/128/256 (51673586–88), DualStream fix (51672840)
+2. [done] Fixed inplace autograd bug in `TrackingTransformer._forward_sequential`; decided TF-only training
+3. [done] Selected bs=128 from throughput plateau
+4. [done] Corrected lr scan with ROP — Tracking best lr=1e-2, DualStream best lr=3e-3
+5. [pending] d_model scan at tuned (bs=128, best lr), 500 epochs, cosine on `encoded_sectioned_10k`
+6. [pending] Compare AR-mode per-step MSE curves and val_loss across all three architectures at each d_model
 
 ---
 
 ## Pending Experiments
 
-- **Architecture comparison tuning** (2026-04-16): Speed benchmarks running (jobs 51673422, 51673586–88, 51672840). Once results are in, select bs, then submit lr scan for TrackingTransformer and DualStreamTransformer.
+- **Architecture comparison d_model scan** (2026-04-17): d_model ∈ {64, 128, 256, 512}, n_layers=6, bs=128, 500 epochs, cosine on `encoded_sectioned_10k`. Tracking at lr=1e-2, DualStream at lr=3e-3. Evaluate best checkpoints in AR mode; compare per-step MSE curves across all three architectures.
 
 ---
 

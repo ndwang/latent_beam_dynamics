@@ -175,18 +175,18 @@ class TrackingTransformer(nn.Module):
         """
         h = self.element_encoder(x_raw)
         B, N, _ = h.shape
-        d_z = self.config.latent_dim
 
-        z_prev_buf = torch.empty(B, N, d_z, device=z0.device, dtype=z0.dtype)
-        z_pred_buf = torch.empty(B, N, d_z, device=z0.device, dtype=z0.dtype)
         z_cur = z0
+        z_prev_list: list[torch.Tensor] = []
+        z_pred_list: list[torch.Tensor] = []
 
         for t in range(N):
-            z_prev_buf[:, t] = z_cur
+            z_prev_list.append(z_cur)
+            z_prev_seq = torch.stack(z_prev_list, dim=1)  # (B, t+1, latent_dim)
 
-            delta_z = self.transformer(z_prev_buf[:, :t+1], h[:, :t+1])
+            delta_z = self.transformer(z_prev_seq, h[:, :t+1])
             z_predicted = z_cur + delta_z[:, -1]
-            z_pred_buf[:, t] = z_predicted
+            z_pred_list.append(z_predicted)
 
             if t < N - 1:
                 if z_gt is not None:
@@ -195,7 +195,7 @@ class TrackingTransformer(nn.Module):
                 else:
                     z_cur = z_predicted
 
-        return z_pred_buf
+        return torch.stack(z_pred_list, dim=1)
 
     # -- unified entry point ------------------------------------------------
 

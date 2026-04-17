@@ -20,10 +20,11 @@ Latent-space causal transformer for accelerator beam dynamics, trained on NERSC 
 ├── slurm/            # NERSC job submission scripts
 └── src/              # Source code
     ├── models/       # Model definitions (subpackage)
-    │   ├── common.py     # ModelConfig, ElementEncoder, ContinuousPositionalEncoding
-    │   ├── tracking.py   # TrackingTransformer (autoregressive), TrackingConfig
-    │   ├── lattice.py    # LatticeTransformer (parallel/AdaLN), LatticeConfig (alias)
-    │   └── losses.py     # trajectory_mse_loss
+    │   ├── common.py       # ModelConfig, ElementEncoder, ContinuousPositionalEncoding
+    │   ├── tracking.py     # TrackingTransformer (autoregressive), TrackingConfig
+    │   ├── lattice.py      # LatticeTransformer (parallel/AdaLN), LatticeConfig (alias)
+    │   ├── dual_stream.py  # DualStreamTransformer (two-stream causal), DualStreamConfig
+    │   └── losses.py       # trajectory_mse_loss
     ├── data/         # LatentTrajectoryDataset
     ├── training/     # BaseTrainer, TrackingTrainer, LatticeTrainer
     └── utils/        # Config, validation, logging, W&B
@@ -31,7 +32,7 @@ Latent-space causal transformer for accelerator beam dynamics, trained on NERSC 
 
 ## Models
 
-Two transformer architectures in `src/models/`, sharing `ElementEncoder` and `ContinuousPositionalEncoding` from `common.py`:
+Three transformer architectures in `src/models/`, sharing `ElementEncoder` and `ContinuousPositionalEncoding` from `common.py`:
 
 ### TrackingTransformer (`tracking.py`)
 
@@ -50,6 +51,16 @@ Parallel (non-autoregressive) model. The initial beam state z₀ conditions all 
   - `BeamConditioner`: maps z₀ → per-layer AdaLN parameters (gamma/beta), initialized to identity
   - `AdaLNTransformerLayer`: pre-norm attention and FFN with external gamma/beta conditioning
 - Single `forward(z0, x_raw)` path for both training and inference
+
+### DualStreamTransformer (`dual_stream.py`)
+
+Two-stream causal model. Element tokens and beam tokens are kept in separate sequences throughout; cross-attention is the only bridge. Beam tokens come from projecting `z_{t-1}` into `d_model`; element tokens come from `ElementEncoder` (computed once in parallel). Each layer applies: (1) causal self-attention over beam tokens, (2) causal cross-attention (beam as Q, elements as K/V), (3) FFN. Δz is predicted and added to `z_{t-1}`.
+
+- **Config:** `DualStreamConfig` (alias for `ModelConfig`)
+- **Trainer:** `DualStreamTrainer` (alias for `TrackingTrainer`)
+- **No beam positional encoding:** VAE latent already encodes `s`-position; element stream retains Fourier PE
+- **Same three forward modes as TrackingTransformer:** teacher forcing, scheduled sampling, autoregressive
+- Full design rationale in `docs/MODEL_DESIGN.md` §3c
 
 ## Quick Commands
 
@@ -74,6 +85,9 @@ python scripts/train.py model.name=tracking
 
 # Train LatticeTransformer
 python scripts/train.py model.name=lattice
+
+# Train DualStreamTransformer
+python scripts/train.py model.name=dual_stream
 
 # Override hyperparameters
 python scripts/train.py model.d_model=512 training.epochs=300
@@ -106,8 +120,9 @@ python scripts/evaluate.py runs/<run>/lbd_best.pth --data /path/to/data --output
 # Run model sanity checks
 python scripts/check_models.py
 
-# Submit a single training run to SLURM — all args passed as Hydra overrides
-sbatch slurm/submit_single.sh model.d_model=512 training.epochs=500 data.path=data/encoded_sectioned_10k
+# Submit a single training run to SLURM
+# Args: <run_prefix> <sweep_group> <overrides>
+sbatch slurm/submit_single.sh "tracking_d512" "scan_dmodel" "model.d_model=512 training.epochs=500 data.path=data/encoded_sectioned_10k"
 
 # Submit a 1D hyperparameter scan to SLURM (4 parallel GPU jobs)
 # Args: <param_name> <space-separated values> <fixed overrides> <sweep group>

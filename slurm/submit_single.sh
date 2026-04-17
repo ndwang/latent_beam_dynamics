@@ -16,22 +16,26 @@
 # ============================================
 # SINGLE TRAINING RUN — LatentBeamTransformer
 # ============================================
-# Usage: sbatch slurm/submit_single.sh <overrides...>
+# Usage: sbatch slurm/submit_single.sh <run_prefix> <sweep_group> <overrides>
 # Example:
-#   sbatch slurm/submit_single.sh model.d_model=512 training.epochs=500 data.path=data/encoded_sectioned_10k
-# All arguments are passed directly to train.py as Hydra overrides.
+#   sbatch slurm/submit_single.sh "dual_stream_fusion_add" "scan_fusion" "model.name=dual_stream model.fusion=add data.path=data/encoded_sectioned_10k"
 # ============================================
 
-if [[ $# -eq 0 ]]; then
-    echo "Usage: sbatch slurm/submit_single.sh <overrides...>" >&2
+if [[ $# -ne 3 ]]; then
+    echo "Usage: $0 <run_prefix> <sweep_group> <overrides>" >&2
     exit 1
 fi
+RUN_PREFIX="$1"
+SWEEP_GROUP="$2"
+OVERRIDES="$3"
 
 cd /pscratch/sd/n/ndwang/latent_beam_dynamics
 ml load conda
 conda activate lbd
 
-python scripts/train.py "$@" training.wandb.enabled=true
+RUN_NAME="${RUN_PREFIX}_$(date +%y%m%d_%H%M)"
+
+python scripts/train.py $OVERRIDES run_name=${RUN_NAME} training.wandb.enabled=true training.wandb.group=${SWEEP_GROUP}
 
 echo "Syncing W&B logs..."
 for dir in runs/*/wandb/offline-run-*; do

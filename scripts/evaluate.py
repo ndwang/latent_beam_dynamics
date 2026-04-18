@@ -34,6 +34,7 @@ from tqdm import tqdm
 from src.models import ModelConfig, LatticeConfig, TrackingTransformer, LatticeTransformer, DualStreamTransformer
 from src.data import LatentTrajectoryDataset
 from src.utils.config import load_config
+from evaluate_ar import run_ar_inference, plot_mse_curve
 
 _MODELS = {"tracking": TrackingTransformer, "lattice": LatticeTransformer, "dual_stream": DualStreamTransformer}
 
@@ -123,40 +124,6 @@ def build_val_loader(config: dict, data_override, batch_size: int):
     return loader, data_path
 
 
-# ── Inference ─────────────────────────────────────────────────────────────────
-
-@torch.no_grad()
-def run_inference(model, model_name: str, loader: DataLoader, device: torch.device):
-    is_tracking = model_name in ("tracking", "dual_stream")
-    z0_list, el_list, z_gt_list, z_ar_list, z_tf_list = [], [], [], [], []
-
-    for z0, elements, z_gt in tqdm(loader, desc="Inference"):
-        z0 = z0.to(device)
-        elements = elements.to(device)
-        z_gt_d = z_gt.to(device)
-
-        if is_tracking:
-            z_tf_list.append(
-                model(z0, elements, z_gt=z_gt_d, sampling_prob=0.0).cpu().numpy()
-            )
-            z_ar_list.append(model(z0, elements).cpu().numpy())
-        else:
-            z_ar_list.append(model(z0, elements).cpu().numpy())
-
-        z0_list.append(z0.cpu().numpy())
-        el_list.append(elements.cpu().numpy())
-        z_gt_list.append(z_gt.numpy())
-
-    out = {
-        "z0":      np.concatenate(z0_list),    # (N, d_z)
-        "z_gt":    np.concatenate(z_gt_list),  # (N, T, d_z)
-        "z_pred":  np.concatenate(z_ar_list),  # (N, T, d_z)  AR or standard
-    }
-    if is_tracking:
-        out["z_pred_tf"] = np.concatenate(z_tf_list)
-    return out
-
-
 # ── Sample selection ──────────────────────────────────────────────────────────
 
 def select_samples(z_pred: np.ndarray, z_gt: np.ndarray, n: int) -> np.ndarray:
@@ -240,24 +207,22 @@ def _sample_colors(n: int):
     return plt.cm.tab10(np.linspace(0, 0.9, n))
 
 
-def plot_per_step_mse(data: dict, model_name: str, output_dir: Path):
-    z_gt   = data["z_gt"]
-    z_pred = data["z_pred"]
-    steps  = np.arange(z_gt.shape[1])
+def plot_per_step_mse(z_gt: np.ndarray, z_ar: np.ndarray, model_name: str,
+                      output_dir: Path, z_tf: np.ndarray | None = None):
+    mse_ar_samples = ((z_ar - z_gt) ** 2).mean(axis=2)
+    mse_tf_samples = ((z_tf - z_gt) ** 2).mean(axis=2) if z_tf is not None else None
 
-    mse_ar = ((z_pred - z_gt) ** 2).mean(axis=(0, 2))
+    steps = np.arange(z_gt.shape[1])
     fig, ax = plt.subplots(figsize=(8, 4))
-    label = "autoregressive" if model_name == "tracking" else model_name
-    ax.semilogy(steps, mse_ar, label=f"{label}  (mean {mse_ar.mean():.5f})")
 
-    if "z_pred_tf" in data:
-        mse_tf = ((data["z_pred_tf"] - z_gt) ** 2).mean(axis=(0, 2))
-        ax.semilogy(steps, mse_tf, linestyle="--",
-                    label=f"teacher-forcing  (mean {mse_tf.mean():.5f})")
+    plot_mse_curve(ax, steps, mse_ar_samples, color="C0", label_prefix="AR  ")
+    if mse_tf_samples is not None:
+        plot_mse_curve(ax, steps, mse_tf_samples, color="C1", linestyle="--",
+                       label_prefix="TF  ")
 
     ax.set_xlabel("Element index")
     ax.set_ylabel("MSE (latent space)")
-    ax.set_title("Per-step MSE — validation set")
+    ax.set_title(f"Per-step MSE — {model_name}, validation set")
     ax.legend()
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -488,23 +453,19 @@ def main():
     print(f"Output: {output_dir}")
 
     loader, data_dir = build_val_loader(config, args.data, args.batch_size)
-    data = run_inference(model, model_name, loader, device)
 
-    z_gt   = data["z_gt"]
-    z_pred = data["z_pred"]
+    z_gt, z_ar, z_tf = run_ar_inference(model, model_name, loader, device)
 
-    sel = select_samples(z_pred, z_gt, args.n_samples)
+    sel = select_samples(z_ar, z_gt, args.n_samples)
 
     # ── Metrics ──
-    overall_mse = float(((z_pred - z_gt) ** 2).mean())
     metrics: dict = {
-        "overall_mse":        overall_mse,
-        "checkpoint_epoch":   ckpt.get("epoch"),
+        "checkpoint_epoch":    ckpt.get("epoch"),
         "checkpoint_val_loss": ckpt.get("val_loss"),
+        "ar_mean_mse":         float(((z_ar - z_gt) ** 2).mean()),
     }
-    if "z_pred_tf" in data:
-        metrics["ar_mse"] = overall_mse
-        metrics["tf_mse"] = float(((data["z_pred_tf"] - z_gt) ** 2).mean())
+    if z_tf is not None:
+        metrics["tf_mean_mse"] = float(((z_tf - z_gt) ** 2).mean())
 
     metrics_path = output_dir / "metrics.json"
     with open(metrics_path, "w") as f:
@@ -513,10 +474,10 @@ def main():
     print(f"Saved {metrics_path}")
 
     # ── Plot 1: per-step MSE ──
-    plot_per_step_mse(data, model_name, output_dir)
+    plot_per_step_mse(z_gt, z_ar, model_name, output_dir, z_tf)
 
     # ── Plot 5: latent PCA ──
-    plot_latent_pca(z_gt, z_pred, sel, output_dir)
+    plot_latent_pca(z_gt, z_ar, sel, output_dir)
 
     # ── Plots 2–4: require VAE ──
     vae, _ = load_vae(data_dir, device)
@@ -524,8 +485,8 @@ def main():
         return
 
     print("Decoding selected samples through VAE...")
-    z_gt_sel   = z_gt[sel]    # (n_sel, T, d_z)
-    z_pred_sel = z_pred[sel]  # (n_sel, T, d_z)
+    z_gt_sel   = z_gt[sel]   # (n_sel, T, d_z)
+    z_pred_sel = z_ar[sel]   # (n_sel, T, d_z)
 
     scales_gt,   centroids_gt,   maps_gt   = decode_trajectories(vae, z_gt_sel,   device)
     scales_pred, centroids_pred, maps_pred = decode_trajectories(vae, z_pred_sel, device)

@@ -144,13 +144,16 @@ def per_step_mse(z_pred: np.ndarray, z_gt: np.ndarray) -> np.ndarray:
 
 def plot_mse_curve(ax, steps, mse_per_sample: np.ndarray, color,
                    linestyle: str = "-", label_prefix: str = ""):
-    """Plot mean line with 25–75 and 10–90 percentile bands on a log-scale axis."""
+    """Plot mean and median lines with 10–90 percentile band (AR only) on a log-scale axis."""
     mean = mse_per_sample.mean(axis=0)
-    p10, p25, p75, p90 = np.percentile(mse_per_sample, [10, 25, 75, 90], axis=0)
+    median = np.median(mse_per_sample, axis=0)
+    p10, p90 = np.percentile(mse_per_sample, [10, 90], axis=0)
     ax.semilogy(steps, mean, color=color, linestyle=linestyle,
                 label=f"{label_prefix}mean {mean.mean():.5f}")
-    ax.fill_between(steps, p25, p75, color=color, alpha=0.25)
-    ax.fill_between(steps, p10, p90, color=color, alpha=0.10)
+    if linestyle == "-":
+        ax.semilogy(steps, median, color=color, linestyle=":", linewidth=1,
+                    label=f"{label_prefix}median {median.mean():.5f}")
+        ax.fill_between(steps, p10, p90, color=color, alpha=0.12)
 
 
 def plot_ar_mse(mse_ar_samples: np.ndarray, label: str, output_dir: Path,

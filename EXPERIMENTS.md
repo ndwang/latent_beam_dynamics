@@ -393,6 +393,30 @@ The next step is a dedicated diagnostic session to identify which samples fail a
 
 ---
 
+## Outlier Diagnosis — RF Cavities as Source of Extreme AR MSE (2026-04-22)
+
+**Question:** Which samples drive the large mean/median gap in AR MSE, and what causes them to fail?
+
+Scan 6 established that the AR mean MSE is dominated by a small tail of catastrophically failing samples — the median AR MSE tracks the TF mean closely, making the mean a misleading summary. The next step is to characterize those outliers.
+
+**Finding 1: AR outliers all fail at RF cavities, not sextupoles or other nonlinear elements.** Inspecting the top-10 worst AR samples, every one shows an error jump of at least two orders of magnitude at an RF cavity. The element-type strip in the outlier trajectory plots shows no other common structure — element type at the spike position is RF in all cases.
+
+**Finding 2: TF error also jumps at RF.** This is the decisive observation. In teacher-forcing mode the model receives the true previous beam state at every step, so AR error accumulation cannot explain the failure. The TF error jumping at the same RF slots means the model fails to predict a single RF step correctly even when given the correct input. The mean/median gap in AR MSE is therefore not primarily an AR stability problem — it is a single-step prediction failure at RF elements that AR inference then amplifies.
+
+**Finding 3: RF cavities are frequent (50% of sequences) but sparse within sequences.** Of the 10,000 training sequences, 4,992 contain at least one RF cavity. Among RF-containing sequences, the mean is 2 RF elements out of 32 — RF occupies only 3.1% of element slots (9,950 out of 320,000). Because the trajectory MSE loss averages over all steps equally, RF steps contribute ~3% of the training signal. The model minimizes loss on the 97% non-RF majority and underfits RF specifically. This explains why a model that performs well in aggregate — low TF val_loss, low AR median — still fails catastrophically at RF.
+
+**Finding 4: Most RF steps are predicted fine; only ~1% are catastrophic.** The TF MSE distribution at RF slots has median ≈ 0.0003 (well within normal range) but p99 ≈ 0.48 — a bimodal structure. The model has learned the RF map for most configurations and fails completely for a small subset. The failures are not uniformly distributed across the RF parameter space: scatter plots of TF MSE vs V_rf and phi_rf show no clustering. Failures appear at all voltage levels and all phases.
+
+**Finding 5: `sigma_z × f_rf × V_rf` is the best linear predictor of TF MSE at RF (r ≈ 0.54), but is not sufficient.** We systematically searched for the beam-state and element-parameter features that predict RF failure. The longitudinal bunch length sigma_z of the incoming beam is the strongest single predictor (r = 0.44), and it improves when combined with f_rf (r = 0.51) and further with V_rf (r = 0.54). The physical interpretation is natural: `sigma_z × f_rf` is the bunch length in units of the RF wavelength — how much of the sinusoidal voltage curve the bunch spans — and `V_rf` is the kick strength. When the bunch is long relative to the wavelength and the kick is strong, the energy gain varies strongly across the bunch, and a single latent step cannot represent this differential kick. The RF phase phi_rf and effective phase at the bunch centroid add nothing (r ≈ 0.02 independently), meaning phase is uniformly distributed across failures and is not the discriminator. Interaction terms involving phi_rf also degraded the correlation slightly.
+
+Despite reaching r = 0.54 with the best composite feature, ~70% of the variance in log TF MSE at RF remains unexplained by scalar marginals of the beam state and element parameters. The remaining failures likely depend on the full 6D distribution shape — particularly z–δ coupling or transverse–longitudinal correlations in the latent vector — rather than any individual observable. We did not find a parameter regime that cleanly separates successes from failures.
+
+**Conclusion.** The AR outlier problem is fundamentally a single-step RF prediction problem. The model fails for ~1% of RF slots, and those failures propagate through AR inference to produce the catastrophic tail that inflates the mean MSE ~10× above the median. The condition `sigma_z × f_rf × V_rf` large is necessary but not sufficient for failure, and no simple threshold cleanly identifies which RF steps will fail. The most direct interventions are (1) upweighting RF steps in the training loss so they receive more gradient signal relative to their 3% frequency share, and (2) generating data with more RF-dense lattices so the model encounters more diverse (beam state, RF parameters) combinations during training.
+
+Scripts: `scripts/analyze_ar_outliers.py`, `scripts/analyze_rf_regime.py`, `scripts/analyze_rf_beam_state.py`. Outputs in `runs/scan_arch_tracking_d_model512_lr3e-3_260418_1324/eval_ar_outliers/` and `runs/scan_arch_dualstream_d_model256_260418_0738/eval_ar_outliers/`.
+
+---
+
 ## Best Checkpoints
 
 | Architecture | Dataset | Run | TF val_loss | AR mean MSE |
@@ -412,8 +436,7 @@ None currently.
 
 ## Open Questions
 
-- **Which samples are the AR outliers, and why?** Nonlinear elements (sextupoles, RF) and section-boundary mismatch are both candidate causes; they imply different fixes. Needs a dedicated diagnostic session.
-- **How to improve AR robustness.** The median AR tracks TF mean — failures are outlier-driven. Options: input noise injection, AR fine-tuning, scheduled sampling. Intervention depends on outlier characterization above.
+- **How to improve AR robustness at RF elements.** Single-step TF failure at RF is the root cause of the outlier tail (diagnosed 2026-04-22). The two most direct interventions are RF loss upweighting and generating data with higher RF density / wider parameter ranges. Whether these are sufficient, or whether a specialized RF module is needed, is open.
 - **Is the transformer over history necessary?** Beam dynamics are Markovian; causal attention may be wasted capacity. Revisit after outlier analysis and robustness work are resolved.
 - **How to scale the dataset beyond 10k samples.** Raw tracking output is ~200 MB/sample (33 snapshots × 100k particles × 6D × float64), making 100k samples ~20 TB — exceeding scratch quota. Requires a redesigned pipeline that encodes and deletes raw particle data incrementally rather than accumulating the full dataset before encoding.
 

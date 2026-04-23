@@ -34,7 +34,7 @@ from tqdm import tqdm
 from src.models import ModelConfig, LatticeConfig, TrackingTransformer, LatticeTransformer, DualStreamTransformer
 from src.data import LatentTrajectoryDataset
 from src.utils.config import load_config
-from evaluate_ar import run_ar_inference, plot_mse_curve
+from src.eval import run_ar_inference, plot_mse_curve
 
 _MODELS = {"tracking": TrackingTransformer, "lattice": LatticeTransformer, "dual_stream": DualStreamTransformer}
 

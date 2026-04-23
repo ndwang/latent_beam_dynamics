@@ -9,14 +9,7 @@ Latent-space causal transformer for accelerator beam dynamics, trained on NERSC 
 │   ├── model/        # Model hyperparameters
 │   ├── training/     # Training hyperparameters
 │   └── data/         # Dataset paths
-├── scripts/          # Entry point scripts
-│   ├── generate_inputs.py  # Stage 1: generate lattice + beam inputs
-│   ├── track_one.sh  # Track one sample with Tao (used by GNU parallel)
-│   ├── analyze_data.py  # Post-tracking data quality diagnostics
-│   ├── scan_alive.py # Quick particle survival check
-│   ├── train.py      # Main training script
-│   ├── evaluate.py   # Post-training checkpoint evaluation + plots
-│   └── check_models.py  # Sanity checks for all model variants
+├── scripts/          # Entry point scripts (see Scripts Reference section below)
 ├── slurm/            # NERSC job submission scripts
 └── src/              # Source code
     ├── models/       # Model definitions (subpackage)
@@ -25,6 +18,9 @@ Latent-space causal transformer for accelerator beam dynamics, trained on NERSC 
     │   ├── lattice.py      # LatticeTransformer (parallel/AdaLN), LatticeConfig (alias)
     │   ├── dual_stream.py  # DualStreamTransformer (two-stream causal), DualStreamConfig
     │   └── losses.py       # trajectory_mse_loss
+    ├── eval.py       # Shared eval utilities: load_checkpoint, build_val_loader,
+    │                 #   run_ar_inference, per_step_mse, per_sample_step_mse,
+    │                 #   plot_mse_curve, plot_ar_mse
     ├── data/         # LatentTrajectoryDataset
     ├── training/     # BaseTrainer, TrackingTrainer, LatticeTrainer
     └── utils/        # Config, validation, logging, W&B
@@ -168,3 +164,80 @@ conda activate lbd            # Stage 4: transformer training (PyTorch + CUDA)
 - **lbd_datagen**: NumPy, distgen, pmd_beamphysics, Bmad/Tao — no PyTorch
 - **vae**: beam_vae package (frequency maps, VAE encode) + PyTorch
 - **lbd**: PyTorch, model training, evaluation
+
+## Scripts Reference
+
+Scripts are grouped by pipeline stage. All Python scripts use `sys.path.insert` to find `src/` relative to the repo root, so they must be run from the repo root.
+
+### Data pipeline (lbd_datagen env)
+
+| Script | What it does | Key args |
+|---|---|---|
+| `generate_inputs.py` | Stage 1: generate Bmad lattice + beam inputs | `--mode sectioned --n-samples N --seq-len 32 --output-dir DIR` |
+| `track_one.sh` | Stage 2: track one sample dir with Tao (called by GNU parallel) | positional: sample dir |
+| `track_node.sh` | Stage 2 parallel driver for multi-node SLURM jobs | `<joblog_dir>` on stdin |
+| `scan_alive.py` | Quick check: histogram of surviving particles at last element | `--data-dir DIR` |
+| `analyze_data.py` | Post-tracking diagnostics: survival, beam size, growth factors | `--data-dir DIR [--output-dir DIR]` |
+
+### VAE encoding (vae env)
+
+| Script | What it does | Key args |
+|---|---|---|
+| `prepare_vae_data.py` | Convert beam_dump.h5 snapshots to 15-channel frequency maps for VAE training | `--data-dir DIR --output DIR --workers N` |
+| `encode_tracked.py` | Stage 3: VAE-encode tracked data → `z_traj.npy` + `elements.npy` | `--input-dir DIR --vae-checkpoint PTH --output-dir DIR` |
+
+### Training (lbd env)
+
+| Script | What it does | Key args |
+|---|---|---|
+| `train.py` | Train any model variant | `model.name=tracking|lattice|dual_stream`, overrides |
+| `check_models.py` | Sanity-check all three model architectures (forward pass, shapes, loss) | none |
+
+### Checkpoint evaluation (lbd env)
+
+All evaluation scripts auto-detect the model config from `<run_dir>/config.yaml`.
+
+| Script | What it does | Outputs |
+|---|---|---|
+| `evaluate.py` | Full eval: MSE, scale/centroid errors, phase-space maps, PCA | `eval/per_step_mse.png`, `scales_error_s*.png`, `centroids_error_s*.png`, `phase_space_s*.png`, `latent_pca.png`, `metrics.json` |
+| `evaluate_ar.py` | AR-only eval for a single checkpoint | `eval_ar/ar_per_step_mse.png`, `ar_mse_curve.npy`, `ar_tf_mse_curve.npy`, `ar_metrics.json` |
+| `compare_ar.py` | Overlay AR MSE curves from multiple checkpoints on one plot | `ar_per_step_mse.png`, `ar_summary.json` |
+| `compare_runs.py` | Summarise training runs from a scan (loss table, convergence, overfitting, config diff) | printed table / plots |
+
+```bash
+python scripts/evaluate_ar.py runs/<run>/lbd_best.pth [--data DIR] [--output DIR]
+python scripts/compare_ar.py runs/*/lbd_best.pth [--data DIR] [--output DIR] [--include-tf]
+python scripts/compare_runs.py runs/scan_* [--all | --convergence | --overfitting | --config-diff]
+```
+
+### Deep error analysis (lbd env)
+
+These scripts dig into *why* AR error is high. All take one or more checkpoint paths as positional arguments and write plots to `<run_dir>/analysis/` by default.
+
+| Script | Question answered | Key outputs |
+|---|---|---|
+| `analyze_ar_outliers.py` | Which element types drive error growth in the worst samples? | `mse_distribution.png`, `delta_mse_by_element.png` (violin), `outlier_trajectories.png` |
+| `analyze_trajectory_cases.py` | What do worst / median / best trajectories look like end-to-end? | `worst/`, `median/`, `best/` subdirs with per-sample MSE, scales, centroids, phase-space plots; `group_mse_comparison.png` |
+| `analyze_rf_regime.py` | Which RF parameter values (V_rf, f_rf, phi_rf) cause high error? | scatter/violin plots of AR & TF MSE vs each RF parameter |
+| `analyze_rf_beam_state.py` | Does the incoming beam state (σ_z, σ_δ, centroid) predict RF error? | scatter plots of TF MSE at RF slots vs beam state variables |
+
+```bash
+python scripts/analyze_ar_outliers.py runs/<run>/lbd_best.pth [--data DIR] [--top-k 10]
+python scripts/analyze_trajectory_cases.py runs/<run>/lbd_best.pth [--data DIR] [--n-per-group 5]
+python scripts/analyze_rf_regime.py runs/<run>/lbd_best.pth [runs/<run2>/lbd_best.pth ...]
+python scripts/analyze_rf_beam_state.py runs/<run>/lbd_best.pth [runs/<run2>/lbd_best.pth ...]
+```
+
+Note: `analyze_rf_beam_state.py` also reads `data/vae_training/sectioned_10k_scales.npy` and `sectioned_10k_centroids.npy` (hardcoded paths).
+
+### Data diagnostics (lbd env)
+
+| Script | What it does | Key args |
+|---|---|---|
+| `visualize_z_evolution.py` | PCA scatter at selected elements, per-PC variance vs index, per-sample step-size heatmap | `--data DIR [--output DIR] [--n-samples 3000]` |
+
+### Infra
+
+| Script | What it does |
+|---|---|
+| `sync_wandb.sh` | Sync all offline W&B runs under `runs/` to the cloud |

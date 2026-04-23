@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Overlay AR per-step MSE curves from multiple checkpoints on one plot.
 
-Calls evaluate_ar.load_checkpoint, build_val_loader, and run_ar_inference for
+Calls src.eval.load_checkpoint, build_val_loader, and run_ar_inference for
 each checkpoint, then overlays the resulting curves.  All checkpoints are run on
 the same validation set (data path and seed taken from the first checkpoint's
 config; override with --data).
@@ -29,8 +29,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from evaluate_ar import (load_checkpoint, build_val_loader, run_ar_inference,
-                         per_sample_step_mse, per_step_mse, plot_mse_curve)
+from src.eval import (load_checkpoint, build_val_loader, run_ar_inference,
+                      per_sample_step_mse, per_step_mse, plot_mse_curve)
 
 
 def parse_args():

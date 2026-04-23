@@ -264,26 +264,6 @@ The generation pipeline was also improved: generation is now distributed across 
 
 ---
 
-## Current Best Config (as of 2026-04-14)
-
-| Hyperparameter  | Value                                    |
-|-----------------|------------------------------------------|
-| output_mode     | direct                                   |
-| d_model         | 128                                      |
-| n_layers        | 6                                        |
-| n_heads         | 8                                        |
-| mlp_ratio       | 4                                        |
-| dropout         | 0.1                                      |
-| weight_decay    | 0.01                                     |
-| lr              | 3e-4                                     |
-| scheduler       | cosine                                   |
-| epochs          | 500                                      |
-| batch_size      | 32                                       |
-
-**val_loss = 0.0232** · run `scan_direct_dmodel_d128_260414_1213`
-
----
-
 ## Architecture Comparison — TrackingTransformer and DualStreamTransformer (2026-04-16)
 
 **Question:** Do TrackingTransformer or DualStreamTransformer outperform LatticeTransformer? The LatticeTransformer conditions all predictions via AdaLN on z₀ alone, which was identified as the dominant architectural bottleneck (per-step MSE grows ~150× across the sequence even with direct output mode and single-section data). TrackingTransformer feeds z_{t-1} as input at each step, giving the model a continuously updated view of the beam state. DualStreamTransformer keeps element and beam tokens in separate streams connected by cross-attention, which is a structural middle ground. Either architecture could in principle fix the z₀-only conditioning limitation.
@@ -345,20 +325,95 @@ The two architectures have different optimal lrs, which is expected given their 
 2. [done] Fixed inplace autograd bug in `TrackingTransformer._forward_sequential`; decided TF-only training
 3. [done] Selected bs=128 from throughput plateau
 4. [done] Corrected lr scan with ROP — Tracking best lr=1e-2, DualStream best lr=3e-3
-5. [pending] d_model scan at tuned (bs=128, best lr), 500 epochs, cosine on `encoded_sectioned_10k`
-6. [pending] Compare AR-mode per-step MSE curves and val_loss across all three architectures at each d_model
+5. [done] d_model scan at tuned (bs=128, best lr), 500 epochs, cosine on `encoded_sectioned_10k`
+6. [done] Stable-lr reruns for Tracking d256/d512 (lr=3e-3) and DualStream d512 (lr=1e-3) — jobs 51736765/66/71
+7. [pending] Compare AR-mode per-step MSE curves across all three architectures at each d_model
+
+**d_model scan results (teacher-forcing val_loss; Tracking d256/d512 and DualStream d512 from stable-lr reruns):**
+
+| d_model | Tracking (lr) | val_loss | DualStream (lr) | val_loss |
+|---------|--------------|----------|----------------|----------|
+| 64      | 1e-2         | 0.002850 | 3e-3           | 0.003298 |
+| 128     | 1e-2         | 0.002209 | 3e-3           | 0.002789 |
+| 256     | 3e-3         | 0.002162 | 3e-3           | 0.002404 |
+| 512     | 3e-3         | **0.002096** | 1e-3       | 0.002493 |
+
+**Results and analysis:**
+
+TrackingTransformer wins at every d_model, with a consistent 15–25% lower TF val_loss than DualStreamTransformer. The Tracking advantage is present from d64 and does not diminish at larger widths, suggesting the architectural difference (conditioning on z_{t-1} at each step vs cross-attention over element tokens) is systematically beneficial and not a tuning artifact.
+
+For TrackingTransformer, the best result is d512 at lr=3e-3 (0.002096, epoch 474 of run `scan_arch_tracking_d_model512_lr3e-3_260418_1324`). The improvement over d256 (0.002162) is modest (~3%), consistent with mild overfitting at 10k samples — the train/val gap at d512 (train=0.000296, val=0.002096, ratio ~7×) is much larger than at d128 (ratio ~2.5×). Capacity is no longer the bottleneck; dataset size is.
+
+For DualStreamTransformer, improvement is monotone through d256 (0.002404). The stable d512 rerun at lr=1e-3 gives 0.002493 — slightly worse than d256. The lr=1e-3 is likely too conservative for d512 (optimal lr sits between 1e-3 and 3e-3), but we did not tune further. DualStream d256 (`scan_arch_dualstream_d_model256_260418_0738`) remains the best DualStream checkpoint.
+
+**Training instability in Tracking d256 and d512 at lr=1e-2 (identified and resolved 2026-04-18):**
+
+The initial Tracking d256 and d512 runs used lr=1e-2, which caused repeated gradient explosions with cosine T_max=500. At d256: multiple moderate spikes, worst at epoch 58. At d512: catastrophic spike at epoch 42 — train jumps from 0.003533 to 0.043605 and stays elevated for ~13 epochs; additional large spikes at epochs 130, 186, 202–206, 213. Gradient clipping (clip=1.0) was insufficient. The root cause is that lr=1e-2 was tuned with ROP, which decays lr reactively and effectively lowers the early-phase lr — with cosine T_max=500 the lr holds near 1e-2 for the first ~50 epochs. Stable reruns at lr=3e-3 (jobs 51736765/66) ran spike-free and improved the d512 convergence floor from 0.002161 to 0.002096; d256 was essentially unchanged (0.002138 → 0.002162), confirming the moderate spikes there had little impact.
+
+**Caveat on cross-architecture comparison:** These TF val_losses reflect one-step prediction accuracy (model predicts z_t given true z_{t-1}) and are not directly comparable to LatticeTransformer val_loss, which is a full open-loop trajectory loss from z₀. TrackingTransformer and DualStreamTransformer are ~8–10× lower on their metric, but this largely reflects the easier task structure of teacher forcing. The true comparison — which architecture produces the most accurate AR trajectories — requires evaluating all three in autoregressive inference mode.
+
+A secondary comparison between Tracking and DualStream TF losses is valid (both use the same metric) and consistently favors Tracking. Whether Tracking's advantage holds in AR inference is the key remaining question.
+
+---
+
+## Scan 6 — AR inference comparison (2026-04-18)
+
+**Question:** Which architecture produces the most accurate open-loop trajectories? The TF val_loss comparison in Scan 5 was not directly comparable across architectures (Tracking/DualStream use one-step TF loss; Lattice uses full open-loop loss). Evaluating all three in AR inference mode puts them on equal footing.
+
+**Checkpoints evaluated** (job 51750686, `eval_compare_ar/`):
+- TrackingTransformer d512, lr=3e-3, epoch 474 (`scan_arch_tracking_d_model512_lr3e-3_260418_1324`)
+- DualStreamTransformer d256, epoch 480 (`scan_arch_dualstream_d_model256_260418_0738`)
+- LatticeTransformer d128 L12, epoch 465 (`scan_direct_depth_d128_L12_260414_1314`)
+
+All evaluated on `encoded_sectioned_10k` val split (1k samples, seed=42).
+
+**Results:**
+
+| Model | AR mean MSE | AR final-step MSE | TF mean MSE | AR/TF ratio |
+|-------|------------|-------------------|-------------|-------------|
+| Tracking d512  | **0.01596** | **0.04410** | 0.002096 | 7.6× |
+| DualStream d256 | 0.01778 | 0.04846 | 0.002404 | 7.4× |
+| Lattice d128 L12 | 0.02234 | 0.05904 | — (open-loop by design) | — |
+
+**Analysis:**
+
+TrackingTransformer holds its lead in AR mode. It achieves 10% lower AR mean MSE than DualStream (0.01596 vs 0.01778) and 29% lower than Lattice (0.02234). The rank ordering from TF training — Tracking > DualStream > Lattice — transfers cleanly to AR inference, confirming the result is not an artifact of the teacher-forcing metric.
+
+The most striking finding is the near-identical AR/TF degradation ratio for both autoregressive models: Tracking degrades 7.6× and DualStream 7.4×. These ratios are indistinguishable given the model size difference (d512 vs d256) and architecture difference. This means neither architecture has a structural advantage in controlling error accumulation — they simply inherit their AR performance from their TF accuracy floor. The better TF model (Tracking) becomes the better AR model by the same proportional margin.
+
+Lattice's AR mean MSE (0.02234) exactly matches its training val_loss (0.022340), as expected — Lattice is trained open-loop and the val_loss is already the AR metric. The autoregressive models in AR mode (Tracking: 0.01596, DualStream: 0.01778) both beat Lattice despite Lattice using a much larger model (d128 L12 vs d256/d512 for the others). The architectural advantage of conditioning on the previous beam state is real and survives the distribution-matched evaluation.
+
+**Physical explanation for growing MSE at larger element indices.** The per-step MSE curves grow monotonically with element index in both AR *and* TF modes. TF mode uses ground-truth history, so distribution shift cannot explain TF degradation — the physics itself becomes harder at larger indices. The `encoded_sectioned_10k` dataset uses multi-section lattices (2–3 FODO sections per sample), and at section boundaries the beam envelope is mismatched to the new section's optics. This mismatch drives beta beating and irregular beam evolution that is genuinely more difficult to predict regardless of training method. The growing MSE at later elements is therefore the sum of two distinct components: (1) intrinsically harder physics near section boundaries, and (2) distribution shift from teacher forcing. Fixing the training method will reduce component 2 but not flatten the curve entirely. Evaluating on `encoded_sectioned_1sec_10k` (no section boundaries) would isolate component 2 and give a cleaner read on how much of the degradation is attributable to training method alone.
+
+**The AR degradation is driven by outliers, not uniform decay.** The updated plot (mean + median + 10–90 band) shows that the AR median tracks the TF mean closely at every element index. The typical sample in AR mode performs nearly as well as the typical sample under teacher forcing; the 7.5× mean degradation is driven by a small tail of catastrophically failing samples. The mean is not a useful summary of AR performance — the median is.
+
+**Next step: identify and characterize the outliers.** Before attributing the failures to section mismatch or training distribution shift, we need to understand which samples blow up and why. The dataset contains lattices with qualitatively different physics — purely linear (dipoles + quadrupoles) vs nonlinear (sextupoles, RF cavities) — and section counts vary from 1 to 3. Nonlinear dynamics and section-boundary mismatch are both plausible outlier causes and may require different fixes. A dedicated diagnostic session is needed to examine which samples fail and what element features characterize them.
+
+The next step is a dedicated diagnostic session to identify which samples fail and what element features (nonlinear elements, section count) characterize them. The intervention — noise injection, AR fine-tuning, scheduled sampling, or more nonlinear-element-rich data — depends on that result.
+
+---
+
+## Best Checkpoints
+
+| Architecture | Dataset | Run | TF val_loss | AR mean MSE |
+|---|---|---|---|---|
+| TrackingTransformer d512 L6 | encoded_sectioned_10k | `scan_arch_tracking_d_model512_lr3e-3_260418_1324` (epoch 474) | 0.002096 | 0.01596 |
+| DualStreamTransformer d256 L6 | encoded_sectioned_10k | `scan_arch_dualstream_d_model256_260418_0738` (epoch 480) | 0.002404 | 0.01778 |
+| LatticeTransformer d128 L12 | encoded_sectioned_10k | `scan_direct_depth_d128_L12_260414_1314` (epoch 465) | 0.022340 | 0.02234 |
+| LatticeTransformer d128 L6 | encoded_sectioned_1sec_10k | `lbd_d128_L6_260414_201843` (epoch 389) | 0.021947 | — |
 
 ---
 
 ## Pending Experiments
 
-- **Architecture comparison d_model scan** (2026-04-17): d_model ∈ {64, 128, 256, 512}, n_layers=6, bs=128, 500 epochs, cosine on `encoded_sectioned_10k`. Tracking at lr=1e-2, DualStream at lr=3e-3. Evaluate best checkpoints in AR mode; compare per-step MSE curves across all three architectures.
+None currently.
 
 ---
 
 ## Open Questions
 
+- **Which samples are the AR outliers, and why?** Nonlinear elements (sextupoles, RF) and section-boundary mismatch are both candidate causes; they imply different fixes. Needs a dedicated diagnostic session.
+- **How to improve AR robustness.** The median AR tracks TF mean — failures are outlier-driven. Options: input noise injection, AR fine-tuning, scheduled sampling. Intervention depends on outlier characterization above.
+- **Is the transformer over history necessary?** Beam dynamics are Markovian; causal attention may be wasted capacity. Revisit after outlier analysis and robustness work are resolved.
 - **How to scale the dataset beyond 10k samples.** Raw tracking output is ~200 MB/sample (33 snapshots × 100k particles × 6D × float64), making 100k samples ~20 TB — exceeding scratch quota. Requires a redesigned pipeline that encodes and deletes raw particle data incrementally rather than accumulating the full dataset before encoding.
-- **μP for hyperparameter transfer across d_model.** Without μP, lr tuned at d128 may be suboptimal at d256/d512. Implementing μP would make the d_model scan directly interpretable and eliminate this confound.
-- **Scheduled sampling vs teacher forcing for TrackingTransformer.** The default scheduled sampling schedule makes training ~12–15× slower after epoch 30. Whether the AR training signal improves val_loss (measured in teacher-forcing mode) enough to justify the cost is unknown.
 

@@ -234,7 +234,7 @@ Note: `analyze_rf_beam_state.py` also reads `data/vae_training/sectioned_10k_sca
 
 | Script | What it does | Key args |
 |---|---|---|
-| `visualize_z_evolution.py` | PCA scatter at selected elements, per-PC variance vs index, per-sample step-size heatmap | `--data DIR [--output DIR] [--n-samples 3000]` |
+| `analyze_z_evolution.py` | PCA scatter at selected elements, per-PC variance vs index, per-sample step-size heatmap | `--data DIR [--output DIR] [--n-samples 3000]` |
 
 ### Infra
 

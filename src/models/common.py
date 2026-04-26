@@ -43,14 +43,15 @@ class ModelConfig:
 
 
 # Physics-informed normalization scales (design doc Section 3, Module A.2)
+# Applied after any per-channel transforms (see ElementEncoder.forward).
 #   L     -> / 1.0 m
 #   K1    -> / 10.0 m^-2
 #   K2    -> / 10.0 m^-2
 #   Angle -> / 2π
-#   V_rf  -> / 10.0 MV
-#   f_rf  -> / 1.0 GHz
+#   V_rf  -> log1p(MV) / log1p(10)   [normalises at 10 MV; 0 stays 0 for non-RF]
+#   f_rf  -> log1p(GHz) / log1p(1)   [normalises at 1 GHz;  0 stays 0 for non-RF]
 #   phi_rf-> / 2π
-_NORM_SCALES = [1.0, 10.0, 10.0, 2.0 * math.pi, 10.0, 1.0, 2.0 * math.pi]
+_NORM_SCALES = [1.0, 10.0, 10.0, 2.0 * math.pi, math.log1p(10.0), math.log(2.0), 2.0 * math.pi]
 
 
 class ElementEncoder(nn.Module):
@@ -81,7 +82,12 @@ class ElementEncoder(nn.Module):
         Returns:
             (B, N, d_model) position-mixed element embeddings.
         """
-        x_norm = x_raw / self.norm_scales
+        # Log-transform V_rf (idx 4, MV) and f_rf (idx 5, GHz) before normalising.
+        # log1p maps 0→0 so non-RF elements (V_rf=f_rf=0) are unaffected.
+        x = x_raw.clone()
+        x[..., 4] = torch.log1p(x_raw[..., 4])
+        x[..., 5] = torch.log1p(x_raw[..., 5])
+        x_norm = x / self.norm_scales
         element_emb = self.mlp(x_norm)
         lengths = x_raw[..., 0]
         positions = ContinuousPositionalEncoding.compute_positions(lengths)

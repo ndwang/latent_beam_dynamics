@@ -474,12 +474,6 @@ Script: `scripts/analyze_rf_phase.py`. Outputs in `eval_ar_outliers/rf_phase.png
 
 ---
 
-## Pending Experiments
-
-None currently.
-
----
-
 ## Fix: Relative longitudinal time in all encoding scripts (2026-04-25)
 
 `pg.t` from pmd_beamphysics is absolute particle time; the HDF5 `time` field is `t − t_ref`. All three encoding scripts (`prepare_vae_data.py`, `encode_tracked.py`, `src/datagen/encode.py`) were using the wrong one, causing `centroid_z` to grow monotonically along the lattice (pure path-length geometry, unpredictable from beam state). Fixed to use `h5_group["time"][:][alive]`.
@@ -494,9 +488,32 @@ V_rf (0.01–20 MV, 3 orders of magnitude) and f_rf (0.1–3 GHz, 1.5 orders) ar
 
 ---
 
+## Fix — Generation constraints for physical RF consistency (2026-04-26)
+
+The outlier diagnosis and RF phase analysis established that the most catastrophic AR failures arise from unphysical combinations of beam and RF parameters that the model has never seen enough of to generalise. Two constraints are now enforced during generation to eliminate these cases at their source.
+
+**1. Bunch length coupled to RF frequency (quarter-wavelength constraint).** Previously `sigma_z` and `f_rf` were sampled independently, producing combinations where the bunch spans many RF wavelengths. The RF phase analysis found that phase_spread > 1 cycle is the near-necessary condition for extreme AR failure: when the bunch spans more than one full wavelength, different particles see wildly different voltage kicks (including sign reversals), and the net effect on the latent distribution is a complex nonlinear reshaping with essentially no training coverage. The fix couples `sigma_z` to the maximum `f_rf` present in the lattice: after `sample_sectioned_lattice` builds the element array, it extracts `max_f_rf_GHz` and stores it in `lattice_info`. When `sample_matched_beam_params` samples `sigma_z`, the upper bound is capped so the ±3σ beam spans at most one quarter wavelength:
+
+```
+6σ_z × f_rf / c < 0.25  →  σ_z < c / (24 × f_rf)
+```
+
+The quarter-wavelength threshold (rather than half) is chosen to handle the worst-case RF phase. With phi_rf at its maximum of ±30° and the beam spanning ±λ/4 = ±π/2 rad around the reference particle, the most lagging tail reaches phase `30° + 90° = 120°` — past the 90° zero crossing and into the decelerating half-cycle. With the quarter-wavelength constraint, the tail reaches at most `30° + 45° = 75°`, where `cos(75°) ≈ 0.26 > 0`, keeping all particles in the accelerating half regardless of RF phase. The cap only binds at high RF frequencies: at 3 GHz it limits `sigma_z` to 0.42 cm (vs the previous maximum of 10 cm); below ~0.5 GHz it never activates.
+
+**2. Minimum beam energy raised to 1 GeV.** `V_rf` (up to 20 MV) and `energy_GeV` were previously sampled independently, with `energy_GeV` as low as 0.1 GeV = 100 MeV. At that corner a single cavity changes the beam energy by 20 MV / 100 MeV = 20% — a strongly nonlinear transformation that is both physically unusual and outside the model's training distribution for any specific energy. Rather than dynamically coupling `V_rf` to `energy_GeV` at sample time (which would require passing energy into the lattice sampler), the minimum beam energy is raised from 0.1 GeV to 1.0 GeV. This guarantees `V_rf / energy < 20 MV / 1000 MeV = 2%` at worst — a large but physically meaningful single-cavity energy gain — without touching the lattice sampling interface.
+
+Both changes require generating a new dataset. They should be applied together with the relative-longitudinal-time encoding fix (2026-04-25), which also requires a full pipeline rerun.
+
+---
+
+## Pending Experiments
+
+None currently.
+
+---
+
 ## Open Questions
 
-- **Adjust generation to fit beams in the RF bucket.** Phase analysis (2026-04-25) shows that phase_spread > 1 RF cycle is the near-necessary condition for extreme AR failure. The root cause is that sigma_z and f_rf are sampled independently with no self-consistency constraint. The fix is to couple them during generation: given a sampled f_rf, cap sigma_z so that the full beam (e.g. ±3σ) fits within one RF bucket, i.e. 6σ_z/c × f_rf < 1. This removes unphysical training samples at their source rather than asking the model to learn dynamics it has never seen enough of. RF loss upweighting (e.g. 10–30×) is a complementary training-side fix that addresses the 3%-of-slots gradient imbalance regardless of data quality.
 - **Is the transformer over history necessary?** Beam dynamics are Markovian; causal attention may be wasted capacity. Revisit after outlier analysis and robustness work are resolved.
 - **How to scale the dataset beyond 10k samples.** Raw tracking output is ~200 MB/sample (33 snapshots × 100k particles × 6D × float64), making 100k samples ~20 TB — exceeding scratch quota. Requires a redesigned pipeline that encodes and deletes raw particle data incrementally rather than accumulating the full dataset before encoding.
 

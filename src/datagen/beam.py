@@ -15,7 +15,7 @@ ALPHA_RANGE = (-2.0, 2.0)          # dimensionless
 EMIT_N_RANGE = (1e-7, 1e-4)        # m*rad normalized (0.1 um to 100 um), log-sampled
 SIGMA_DELTA_RANGE = (1e-4, 1e-2)   # relative, log-sampled
 SIGMA_Z_RANGE = (1e-4, 0.1)        # m (0.1 mm to 10 cm), log-sampled
-ENERGY_RANGE = (0.1, 20.0)         # GeV, log-sampled
+ENERGY_RANGE = (1.0, 20.0)         # GeV, log-sampled
 CENTROID_CLIP = 3.0                 # sigma units
 ELECTRON_MASS_EV = 0.510998950e6   # electron rest mass in eV
 
@@ -132,9 +132,16 @@ def sample_matched_beam_params(
     params['sigma_delta'] = np.exp(rng.uniform(
         np.log(SIGMA_DELTA_RANGE[0]), np.log(SIGMA_DELTA_RANGE[1])
     ))
-    params['sigma_z'] = np.exp(rng.uniform(
-        np.log(SIGMA_Z_RANGE[0]), np.log(SIGMA_Z_RANGE[1])
-    ))
+    # Cap sigma_z so the full beam (±3σ) spans at most a quarter RF wavelength,
+    # keeping all particles in the same half-cycle even at max phi_rf (±30°):
+    # 6σ_z × f_rf / c < 0.25  →  σ_z < c / (24 × f_rf_Hz)
+    _C_LIGHT = 2.998e8  # m/s
+    max_f_rf_GHz = lattice_info.get("max_f_rf_GHz", 0.0)
+    if max_f_rf_GHz > 0:
+        sigma_z_upper = min(SIGMA_Z_RANGE[1], _C_LIGHT / (24.0 * max_f_rf_GHz * 1e9))
+    else:
+        sigma_z_upper = SIGMA_Z_RANGE[1]
+    params['sigma_z'] = np.exp(rng.uniform(np.log(SIGMA_Z_RANGE[0]), np.log(sigma_z_upper)))
 
     # Centroid offsets in units of sigma, clipped to [-3, 3]
     for coord in ['x', 'px', 'y', 'py', 'z', 'delta']:

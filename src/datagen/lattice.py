@@ -344,15 +344,19 @@ def sample_sectioned_lattice(
     L_half = first["L_d"] + first["L_q"]
     beta_x_ref, beta_y_ref = fodo_periodic_twiss(first["mu"], L_half)
 
+    elements_arr = np.array(elements)
+    rf_freqs = elements_arr[elements_arr[:, I_FRF] > 0, I_FRF]
+
     lattice_info = {
         "sections": sections,
         "half_cells_per_section": [int(h) for h in half_cells],
         "beta_x_periodic": float(beta_x_ref),
         "beta_y_periodic": float(beta_y_ref),
         "mu_first_section": float(first["mu"]),
+        "max_f_rf_GHz": float(rf_freqs.max()) if len(rf_freqs) > 0 else 0.0,
     }
 
-    return np.array(elements), lattice_info
+    return elements_arr, lattice_info
 
 
 # ==========================================================================

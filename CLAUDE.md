@@ -220,15 +220,17 @@ These scripts dig into *why* AR error is high. All take one or more checkpoint p
 | `analyze_trajectory_cases.py` | What do worst / median / best trajectories look like end-to-end? | `worst/`, `median/`, `best/` subdirs with per-sample MSE, scales, centroids, phase-space plots; `group_mse_comparison.png` |
 | `analyze_rf_regime.py` | Which RF parameter values (V_rf, f_rf, phi_rf) cause high error? | scatter/violin plots of AR & TF MSE vs each RF parameter |
 | `analyze_rf_beam_state.py` | Does the incoming beam state (σ_z, σ_δ, centroid) predict RF error? | scatter plots of TF MSE at RF slots vs beam state variables |
+| `analyze_rf_phase.py` | Does incoming beam phase spread (cycles of RF spanned) predict RF error? Reads raw HDF5 `time` field directly. | scatter plots of TF MSE vs zero/min/max phase and phase_spread; `--raw-data DIR` |
 
 ```bash
 python scripts/analyze_ar_outliers.py runs/<run>/lbd_best.pth [--data DIR] [--top-k 10]
 python scripts/analyze_trajectory_cases.py runs/<run>/lbd_best.pth [--data DIR] [--n-per-group 5]
 python scripts/analyze_rf_regime.py runs/<run>/lbd_best.pth [runs/<run2>/lbd_best.pth ...]
 python scripts/analyze_rf_beam_state.py runs/<run>/lbd_best.pth [runs/<run2>/lbd_best.pth ...]
+python scripts/analyze_rf_phase.py runs/<run>/lbd_best.pth [--raw-data data/sectioned_10k]
 ```
 
-Note: `analyze_rf_beam_state.py` also reads `data/vae_training/sectioned_10k_scales.npy` and `sectioned_10k_centroids.npy` (hardcoded paths).
+Note: `analyze_rf_beam_state.py` also reads `data/vae_training/sectioned_10k_scales.npy` and `sectioned_10k_centroids.npy` (hardcoded paths). `analyze_rf_phase.py` reads raw HDF5 files directly; phase convention: `phase = 2π f_rf × time` where `time` = t − t_ref from HDF5 (reference particle sees phase 0).
 
 ### Data diagnostics (lbd env)
 

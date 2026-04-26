@@ -417,6 +417,52 @@ Scripts: `scripts/analyze_ar_outliers.py`, `scripts/analyze_rf_regime.py`, `scri
 
 ---
 
+## RF Phase Analysis — Beam Phase Spread at RF Cavities (2026-04-25)
+
+**Question:** Does the phase spread of the incoming beam at RF elements — how many RF cycles the bunch spans — explain the model's single-step TF failures better than the scalar proxy `sigma_z × f_rf` used previously?
+
+**Motivation:** Finding 5 of the Outlier Diagnosis identified `sigma_z × f_rf` as the best linear predictor of TF MSE at RF (r ≈ 0.54), with the physical interpretation that this quantity measures the bunch length in units of the RF wavelength. Rather than using the VAE-decoded sigma_z, we can compute the phase spread directly from the raw particle data: reading the `time` field (= t − t_ref, stored per-particle in HDF5) and computing `phase = 2π × f_rf × time`. The reference particle has time = 0 by convention, so the phase is relative to the cavity with zero_phase = phi_rf (element setting) marking where the reference particle sits in the RF cycle.
+
+**Phase convention.** The `time` field in each HDF5 snapshot stores relative time t − t_ref, where t_ref (stored as `timeOffset`) is the arrival time of the reference particle. At t = t_ref the phase is zero; phi_rf (element setting) is the "zero_phase" that records where this zero sits in the RF voltage cycle. Absolute particle phase is therefore `2π × f_rf_GHz × 1e9 × time`. Since f_rf in elements.npy is in GHz and time is in seconds, the phase in radians is `2π × f_rf_GHz × 1e9 × time[i]`.
+
+**Quantities computed per RF slot:**
+- zero_phase: phi_rf from element settings (where the reference particle sits in the RF cycle)
+- min_phase: 2π f_rf × min(time) — earliest-arriving particle
+- max_phase: 2π f_rf × max(time) — latest-arriving particle
+- phase_spread: max_phase − min_phase (how many radians of RF the bunch spans)
+- sigma_phase: 2π f_rf × std(time) (RMS phase width)
+
+**Correlation results (log10 TF MSE, 1062 RF slots in val set):**
+
+| Feature | Tracking r | DualStream r |
+|---|---|---|
+| zero_phase (phi_rf) | 0.027 | 0.019 |
+| min_phase | -0.480 | -0.467 |
+| max_phase | +0.508 | +0.489 |
+| phase_spread | **0.513** | **0.496** |
+| sigma_phase | **0.513** | **0.496** |
+
+The phase_spread and sigma_phase correlations (r ≈ 0.51/0.50) match the `sigma_z × f_rf` result from the beam-state analysis to three decimal places, confirming that these measure the same underlying quantity. The slight asymmetry between min_phase (r ≈ −0.48) and max_phase (r ≈ +0.51) indicates the tail of late-arriving particles is marginally more predictive of failure than the early tail, consistent with the initial beam not being perfectly symmetric in time. zero_phase remains uncorrelated with failure (r < 0.03) across both architectures.
+
+**Many samples have phase_spread >> π — the beam is entirely outside a single RF bucket.** Phase spreads up to ~40 rad (≈ 6 cycles) appear in the val set. The root cause is a dataset construction mismatch: sigma_z is sampled log-uniformly from 0.1 mm to 10 cm, while f_rf is sampled independently from 0.1–3 GHz. At the extreme corner — sigma_z = 10 cm, f_rf = 3 GHz (λ = 10 cm) — the ±3σ tails of the bunch span ~6 wavelengths = ~37.7 rad. In a real machine, f_rf and bunch length are co-designed so the beam fits within the RF bucket acceptance; in this dataset they are orthogonal draws with no self-consistency constraint, making physically meaningless combinations common.
+
+**The 5 worst AR samples confirm this picture.** Examining the worst 5 samples by mean AR MSE for both models:
+
+*TrackingTransformer:*
+1. Global 7494 (MSE 1.19): 3 RF slots at elements 3, 5, 11 — spreads 8.6, 3.9, 6.5 rad (1.37, 0.62, 1.04 cycles). No single extreme spread, but three independent RF failures compound through AR inference.
+2. Global 7434 (MSE 0.87): single RF at element 1 — spread 11.7 rad (1.87 cycles), V_rf = 4.48 MV. Strong kick into a highly extended beam.
+3. Global 8000 (MSE 0.79): RF at element 3 — spread 20.2 rad (3.22 cycles); second RF at element 11 only 1.9 rad and not a problem.
+4. Global 2785 (MSE 0.60): single RF at element 1 — spread 7.6 rad (1.22 cycles).
+5. Global 4842 (MSE 0.55): RF at elements 15, 17 — spreads 5.2 and 0.5 rad. The second element is trivial; the first (0.83 cycles) is below 1 cycle but still drives significant failure.
+
+*DualStreamTransformer:* The same globals 7494 and 8000 appear in the top-5 for DualStream (ranks 2 and 1 respectively), confirming that the failures are determined by the physics of those samples rather than by architecture-specific weaknesses. DualStream's rank 5 (global 6277) has RF at elements 15, 17, 27 — the element 15 spread is 21.4 rad (3.40 cycles) and element 27 is 10.3 rad (1.64 cycles), both extreme.
+
+**Conclusion.** Phase spread > 1 RF cycle (> 2π rad) is nearly a necessary condition for extreme AR failure — all rank 1–4 samples for both models satisfy this. The mechanism is clear: when the bunch spans more than one RF cycle, different particles see wildly different voltage kicks, the net effect on the latent distribution is a complex nonlinear reshaping, and the model has essentially no training coverage for these configurations because they occupy a sparse, physically unmotivated corner of the joint (sigma_z, f_rf, V_rf) space. The fix is a dataset constraint: couple sigma_z and f_rf during generation so that phase_spread < π (or some chosen threshold like 2π), ensuring all training samples have physically meaningful RF dynamics. This is a cleaner intervention than loss reweighting because it removes the pathological samples rather than asking the model to learn dynamics it has never seen enough of.
+
+Script: `scripts/analyze_rf_phase.py`. Outputs in `eval_ar_outliers/rf_phase.png` for each checkpoint.
+
+---
+
 ## Best Checkpoints
 
 | Architecture | Dataset | Run | TF val_loss | AR mean MSE |
@@ -436,7 +482,9 @@ None currently.
 
 ## Open Questions
 
-- **How to improve AR robustness at RF elements.** Single-step TF failure at RF is the root cause of the outlier tail (diagnosed 2026-04-22). The two most direct interventions are RF loss upweighting and generating data with higher RF density / wider parameter ranges. Whether these are sufficient, or whether a specialized RF module is needed, is open.
+- **Adjust generation to fit beams in the RF bucket.** Phase analysis (2026-04-25) shows that phase_spread > 1 RF cycle is the near-necessary condition for extreme AR failure. The root cause is that sigma_z and f_rf are sampled independently with no self-consistency constraint. The fix is to couple them during generation: given a sampled f_rf, cap sigma_z so that the full beam (e.g. ±3σ) fits within one RF bucket, i.e. 6σ_z/c × f_rf < 1. This removes unphysical training samples at their source rather than asking the model to learn dynamics it has never seen enough of. RF loss upweighting (e.g. 10–30×) is a complementary training-side fix that addresses the 3%-of-slots gradient imbalance regardless of data quality.
+- **All datasets should use relative longitudinal time.** Currently z = −βc × t_abs (using pg.t, the absolute particle time). This means centroid_z = −βc × t_ref, which grows monotonically along the lattice as the reference particle accumulates path length — a quantity determined entirely by the lattice geometry, not the beam dynamics. The model cannot predict it from the beam state and was observed to fail completely at z centroid. The fix is to use z = −βc × (t − t_ref) = −βc × time, where time is the HDF5 relative-time field (already t − t_ref). In this convention centroid_z ≈ 0 for a beam centered on the reference particle, and the model only needs to predict physically meaningful deviations from that. This requires reprocessing all datasets (including VAE training data) and retraining the VAE before any downstream transformer training.
+- **Log-transform V_rf and f_rf in the element vector.** V_rf spans 0.01–20 MV (3 orders of magnitude) and f_rf spans 0.1–3 GHz (1.5 orders). The ElementEncoder currently ingests these on a linear scale, which is a poor inductive bias — the difference between 0.01 and 0.1 MV is treated the same as between 10 and 20 MV. Replacing V_rf and f_rf with log(V_rf) and log(f_rf) (or normalising to [0, 1] on a log scale) before the encoder gives the network a representation that respects the multiplicative structure of these parameters. This is especially important given that V_rf × f_rf (or equivalently phase_spread) is the dominant predictor of RF failure.
 - **Is the transformer over history necessary?** Beam dynamics are Markovian; causal attention may be wasted capacity. Revisit after outlier analysis and robustness work are resolved.
 - **How to scale the dataset beyond 10k samples.** Raw tracking output is ~200 MB/sample (33 snapshots × 100k particles × 6D × float64), making 100k samples ~20 TB — exceeding scratch quota. Requires a redesigned pipeline that encodes and deletes raw particle data incrementally rather than accumulating the full dataset before encoding.
 

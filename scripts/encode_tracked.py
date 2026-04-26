@@ -32,6 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.datagen.encode import load_vae
 
+# Bump when encoding logic changes (z-coordinate convention, frequency map, etc.).
+# v1: original; v2: use t-t_ref from HDF5 instead of absolute pg.t for z_bunch
+DATA_VERSION = 2
 
 # ---------------------------------------------------------------------------
 # CPU worker: read HDF5 + compute frequency maps for one sample
@@ -279,6 +282,7 @@ def main():
     vae_config_path = vae_run_dir / "config.yaml"
     vae_config = yaml.safe_load(vae_config_path.read_text()) if vae_config_path.exists() else None
     meta = {
+        "data_version": DATA_VERSION,
         "vae_checkpoint": str(vae_ckpt_path),
         "vae_run_dir": str(vae_run_dir),
         "vae_config": vae_config,

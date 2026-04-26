@@ -61,19 +61,23 @@ Two-stream causal model. Element tokens and beam tokens are kept in separate seq
 ## Quick Commands
 
 ```bash
+# Data versioning: data/v1/ = legacy (old encoding + generation); data/v2/ = current.
+# DATA_VERSION in generate_inputs.py and encode_tracked.py is written to metadata.json.
+# Bump both constants when generation or encoding logic changes, and generate to data/vN/.
+
 # Generate + track on a single 128-CPU SLURM node (recommended)
 # Args: <output_dir> [mode] [n_samples] [seq_len] [n_sections] [seed]
 # n_sections=1 (default) uses single-section lattices — avoids cross-section mismatch bias
-sbatch slurm/generate_and_track.sh data/sectioned_1sec_10k
-sbatch slurm/generate_and_track.sh data/sectioned_1sec_10k sectioned 10000 32 1 200
+sbatch slurm/generate_and_track.sh data/v2/sectioned_1sec_10k
+sbatch slurm/generate_and_track.sh data/v2/sectioned_1sec_10k sectioned 10000 32 1 200
 
 # Chain with encoding via job dependency (submit all at once, run sequentially):
-jid=$(sbatch --parsable slurm/generate_and_track.sh data/sectioned_1sec_10k sectioned 10000 32 1 200)
-sbatch --dependency=afterok:$jid slurm/encode_tracked.sh data/sectioned_1sec_10k data/encoded_sectioned_1sec_10k
+jid=$(sbatch --parsable slurm/generate_and_track.sh data/v2/sectioned_1sec_10k sectioned 10000 32 1 200)
+sbatch --dependency=afterok:$jid slurm/encode_tracked.sh data/v2/sectioned_1sec_10k data/v2/encoded_sectioned_1sec_10k
 
 # Interactive generation + tracking (lbd_datagen env, for testing):
-python scripts/generate_inputs.py --mode sectioned --n-samples 10000 --seq-len 32 --n-sections 1 --output-dir data/sectioned_1sec_10k --seed 200
-find data/sectioned_1sec_10k -mindepth 1 -maxdepth 1 -type d | sort | \
+python scripts/generate_inputs.py --mode sectioned --n-samples 10000 --seq-len 32 --n-sections 1 --output-dir data/v2/sectioned_1sec_10k --seed 200
+find data/v2/sectioned_1sec_10k -mindepth 1 -maxdepth 1 -type d | sort | \
     parallel -j$(nproc) bash scripts/track_one.sh {}
 
 # Train TrackingTransformer
@@ -133,6 +137,15 @@ bash scripts/sync_wandb.sh
 - Memory-mapped `.npy` files in a directory:
   - `z_traj.npy`: `(N, seq_len+1, latent_dim)` — VAE-encoded beam states
   - `elements.npy`: `(N, seq_len, element_dim)` — raw element parameters `[L, K1, K2, Angle, V_rf, f_rf, phi_rf]`
+
+### Data versioning
+
+Datasets live under `data/vN/` where `N` matches `DATA_VERSION` in `generate_inputs.py` and `encode_tracked.py`. Each `metadata.json` / `vae_meta.json` records `data_version` for provenance. Bump both constants together when generation or encoding logic changes.
+
+| Version | Directory | What changed |
+|---------|-----------|--------------|
+| v1 | `data/v1/` | Legacy: absolute `pg.t` for z, no RF constraints, min energy 0.1 GeV |
+| v2 | `data/v2/` | Current: t−t_ref from HDF5, RF quarter-wavelength constraint, min energy 1 GeV |
 
 ## Experiment Tracking
 

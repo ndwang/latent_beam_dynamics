@@ -3,7 +3,7 @@
 
 model: model/default.yaml
 training: training/default.yaml
-data: data/default.yaml
+data: data/v2_sectioned_1sec_10k.yaml
 
 output_dir: ./runs
 run_name: null  # Auto-generated if not specified

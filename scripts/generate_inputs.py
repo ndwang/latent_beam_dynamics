@@ -33,6 +33,10 @@ from src.datagen.lattice import (
 from src.datagen.beam import sample_beam_params, sample_matched_beam_params, generate_particles
 
 
+# Bump when generation logic changes (beam sampling, lattice sampling, constraints).
+# v1: original; v2: t-t_ref encoding + RF constraints + min energy 1 GeV
+DATA_VERSION = 2
+
 LEGACY_SAMPLERS = {
     'structured': sample_structured_lattice,
     'random': sample_random_lattice,
@@ -141,6 +145,7 @@ def main():
     # Only the node covering the start of the dataset writes metadata
     if start_idx == 0:
         metadata = {
+            'data_version': DATA_VERSION,
             'mode': args.mode,
             'linear': args.linear,
             'n_sections': args.n_sections,

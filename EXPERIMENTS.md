@@ -508,7 +508,7 @@ Both changes require generating a new dataset. They should be applied together w
 
 ## Pending Experiments
 
-None currently.
+**v2 dataset + retrain.** SLURM jobs 52101343 (generate+track) → 52101344 (prepare VAE data) submitted 2026-04-26. Once complete, train new VAE on `data/v2/vae_training/sectioned_1sec_10k_maps.npy`, then encode (`slurm/encode_tracked.sh`) and retrain the transformer on `data/v2/encoded_sectioned_1sec_10k`. Expected to improve AR MSE by fixing the z-coordinate encoding bug, the RF quarter-wavelength constraint, and the minimum energy floor — all three changes affect the training distribution in ways the outlier analysis identified as root causes of failure.
 
 ---
 

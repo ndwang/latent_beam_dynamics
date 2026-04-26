@@ -480,11 +480,17 @@ None currently.
 
 ---
 
+## Fix: Relative longitudinal time in all encoding scripts (2026-04-25)
+
+`pg.t` from pmd_beamphysics is absolute particle time; the HDF5 `time` field is `t − t_ref`. All three encoding scripts (`prepare_vae_data.py`, `encode_tracked.py`, `src/datagen/encode.py`) were using the wrong one, causing `centroid_z` to grow monotonically along the lattice (pure path-length geometry, unpredictable from beam state). Fixed to use `h5_group["time"][:][alive]`.
+
+Requires full pipeline rerun: regenerate VAE training data → retrain VAE → re-encode transformer data → retrain transformer.
+
+---
+
 ## Open Questions
 
 - **Adjust generation to fit beams in the RF bucket.** Phase analysis (2026-04-25) shows that phase_spread > 1 RF cycle is the near-necessary condition for extreme AR failure. The root cause is that sigma_z and f_rf are sampled independently with no self-consistency constraint. The fix is to couple them during generation: given a sampled f_rf, cap sigma_z so that the full beam (e.g. ±3σ) fits within one RF bucket, i.e. 6σ_z/c × f_rf < 1. This removes unphysical training samples at their source rather than asking the model to learn dynamics it has never seen enough of. RF loss upweighting (e.g. 10–30×) is a complementary training-side fix that addresses the 3%-of-slots gradient imbalance regardless of data quality.
-- **All datasets should use relative longitudinal time.** Currently z = −βc × t_abs (using pg.t, the absolute particle time). This means centroid_z = −βc × t_ref, which grows monotonically along the lattice as the reference particle accumulates path length — a quantity determined entirely by the lattice geometry, not the beam dynamics. The model cannot predict it from the beam state and was observed to fail completely at z centroid. The fix is to use z = −βc × (t − t_ref) = −βc × time, where time is the HDF5 relative-time field (already t − t_ref). In this convention centroid_z ≈ 0 for a beam centered on the reference particle, and the model only needs to predict physically meaningful deviations from that. This requires reprocessing all datasets (including VAE training data) and retraining the VAE before any downstream transformer training.
-- **Log-transform V_rf and f_rf in the element vector.** V_rf spans 0.01–20 MV (3 orders of magnitude) and f_rf spans 0.1–3 GHz (1.5 orders). The ElementEncoder currently ingests these on a linear scale, which is a poor inductive bias — the difference between 0.01 and 0.1 MV is treated the same as between 10 and 20 MV. Replacing V_rf and f_rf with log(V_rf) and log(f_rf) (or normalising to [0, 1] on a log scale) before the encoder gives the network a representation that respects the multiplicative structure of these parameters. This is especially important given that V_rf × f_rf (or equivalently phase_spread) is the dominant predictor of RF failure.
 - **Is the transformer over history necessary?** Beam dynamics are Markovian; causal attention may be wasted capacity. Revisit after outlier analysis and robustness work are resolved.
 - **How to scale the dataset beyond 10k samples.** Raw tracking output is ~200 MB/sample (33 snapshots × 100k particles × 6D × float64), making 100k samples ~20 TB — exceeding scratch quota. Requires a redesigned pipeline that encodes and deletes raw particle data incrementally rather than accumulating the full dataset before encoding.
 

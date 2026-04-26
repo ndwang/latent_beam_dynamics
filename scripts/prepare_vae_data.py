@@ -15,7 +15,7 @@ where:
     x, y     — transverse position [m]
     x' = px / p_ref  — horizontal angle [rad]
     y' = py / p_ref  — vertical angle [rad]
-    z = -beta * c * t  — bunch-frame longitudinal position [m] (t is already t - t_ref)
+    z = -beta * c * time  — bunch-frame longitudinal position [m] (time = t - t_ref from HDF5)
     delta = (pz - p0c) / p0c  — relative momentum deviation [1] (p0c from HDF5)
 
 Usage:
@@ -79,8 +79,8 @@ def _process_sample(args_tuple):
 
                 delta = (pz_alive - p0c) / p0c
 
-                # t is already t - t_ref in the HDF5
-                z_bunch = -pg.beta[alive] * SPEED_OF_LIGHT * pg.t[alive]
+                # time field in HDF5 is t - t_ref; pg.t is absolute and must not be used
+                z_bunch = -pg.beta[alive] * SPEED_OF_LIGHT * h5_group["time"][:][alive]
 
                 particles = np.column_stack([
                     pg.x[alive], xp, pg.y[alive], yp, z_bunch, delta,
@@ -188,7 +188,7 @@ def main():
             "Horizontal angle (px / p_ref)",
             "Vertical position",
             "Vertical angle (py / p_ref)",
-            "Bunch-frame longitudinal position (-beta*c*t)",
+            "Bunch-frame longitudinal position (-beta*c*(t-t_ref))",
             "Relative momentum deviation ((pz - p0c) / p0c)",
         ],
         "n_samples": len(all_maps),

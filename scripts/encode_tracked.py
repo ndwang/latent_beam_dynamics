@@ -79,7 +79,8 @@ def _process_sample(args):
                 yp = pg.py[alive] / p0c
                 pz_alive = pg.pz[alive]
                 delta = (pz_alive - p0c) / p0c
-                z_bunch = -pg.beta[alive] * SPEED_OF_LIGHT * pg.t[alive]
+                # time field in HDF5 is t - t_ref; pg.t is absolute and must not be used
+                z_bunch = -pg.beta[alive] * SPEED_OF_LIGHT * h5_group["time"][:][alive]
 
                 particles = np.column_stack([
                     pg.x[alive], xp, pg.y[alive], yp, z_bunch, delta,
